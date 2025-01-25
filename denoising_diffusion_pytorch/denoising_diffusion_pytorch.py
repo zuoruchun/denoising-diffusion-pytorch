@@ -38,26 +38,26 @@ ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 # helpers functions
 
-def exists(x):
+def exists(x):  # 判断x是否存在，存在返回True，不存在返回False
     return x is not None
 
-def default(val, d):
+def default(val, d):    # 如果val存在，则返回val，否则返回d
     if exists(val):
         return val
     return d() if callable(d) else d
 
-def cast_tuple(t, length = 1):
+def cast_tuple(t, length = 1):  # 将t转换为长度为length的元组
     if isinstance(t, tuple):
         return t
     return ((t,) * length)
 
-def divisible_by(numer, denom):
+def divisible_by(numer, denom):  # 判断numer是否能被denom整除
     return (numer % denom) == 0
 
-def identity(t, *args, **kwargs):
+def identity(t, *args, **kwargs):  # 返回t
     return t
 
-def cycle(dl):
+def cycle(dl):  # 无限循环数据加载器
     while True:
         for data in dl:
             yield data
@@ -273,46 +273,49 @@ class Attention(Module):
 
 # model
 
-class Unet(Module):
+class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch.nn
     def __init__(
         self,
-        dim,
-        init_dim = None,
-        out_dim = None,
-        dim_mults = (1, 2, 4, 8),
-        channels = 3,
-        self_condition = False,
-        learned_variance = False,
-        learned_sinusoidal_cond = False,
-        random_fourier_features = False,
-        learned_sinusoidal_dim = 16,
-        sinusoidal_pos_emb_theta = 10000,
-        dropout = 0.,
-        attn_dim_head = 32,
-        attn_heads = 4,
-        full_attn = None,    # defaults to full attention only for inner most layer
-        flash_attn = False
+        dim,        # 模型维度
+        init_dim = None,  # 初始维度  
+        out_dim = None,    # 输出维度   
+        dim_mults = (1, 2, 4, 8),    # 维度倍数
+        channels = 3,    # 通道数
+        self_condition = False,    # 是否使用自条件，即使用前一步的预测作为额外输入
+        learned_variance = False,    # 是否学习噪声方差
+        learned_sinusoidal_cond = False,    # 是否使用学习到的正弦条件
+        random_fourier_features = False,    # 是否使用随机傅里叶特征    
+        learned_sinusoidal_dim = 16,    # 学习到的正弦条件的维度
+        sinusoidal_pos_emb_theta = 10000,    # 正弦位置嵌入的theta
+        dropout = 0.,    # dropout率，防止过拟合
+        attn_dim_head = 32,    # 注意力头的维度
+        attn_heads = 4,    # 注意力头的数量
+        full_attn = None,    # 默认情况下，仅对最内层使用全注意力
+        flash_attn = False    # 是否使用flash注意力
     ):
-        super().__init__()
+        super().__init__()      # 调用父类Module的初始化方法
 
-        # determine dimensions
+        # determine dimensions 确定尺寸
 
-        self.channels = channels
-        self.self_condition = self_condition
-        input_channels = channels * (2 if self_condition else 1)
+        self.channels = channels    # 通道数，将输入图像的通道数信息传递给模型
+        self.self_condition = self_condition    # 是否使用自条件
+        input_channels = channels * (2 if self_condition else 1)    # 输入通道数，如果使用自条件，则有2个通道，一个是输入图像，另一个是前一步的预测
 
-        init_dim = default(init_dim, dim)
-        self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding = 3)
+        init_dim = default(init_dim, dim)    # 初始维度
+        self.init_conv = nn.Conv2d(input_channels, init_dim, 7, padding = 3)    # 初始化模型的卷积层，输入通道数为input_channels，输出通道数为init_dim，卷积核大小为7，填充为3
+        # 卷积核就是移动的矩阵，padding就是填充，padding=3，就是左右上下各填充3个像素
+        # 输入通道是3，输出通道是64：通过对输入的三个通道的加权输出一个特征，64个不同权重得到64个特征，一般默认是使用nn默认的Conv2d
 
-        dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
-        in_out = list(zip(dims[:-1], dims[1:]))
+        dims = [init_dim, *map(lambda m: dim * m, dim_mults)]    # 输入[64 , *map(lambda m: 64  * m, (1, 2, 4, 8))]，输出[64, 64, 128, 256, 512]
+        in_out = list(zip(dims[:-1], dims[1:]))    # dims = [64, 64, 128, 256, 512]  ---->  [(64, 64), (64, 128), (128, 256), (256, 512)]
 
-        # time embeddings
+        # time embeddings 时间嵌入
 
         time_dim = dim * 4
 
-        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
+        self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features     # 是否使用随机或学习到的正弦条件
 
+        # 如果使用随机或学习到的正弦条件，则使用随机或学习到的正弦条件（这个没看呢）
         if self.random_or_learned_sinusoidal_cond:
             sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
             fourier_dim = learned_sinusoidal_dim + 1
@@ -320,8 +323,9 @@ class Unet(Module):
             sinu_pos_emb = SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta)
             fourier_dim = dim
 
+        # 时间映射网络（这个没看）
         self.time_mlp = nn.Sequential(
-            sinu_pos_emb,
+            sinu_pos_emb,       
             nn.Linear(fourier_dim, time_dim),
             nn.GELU(),
             nn.Linear(time_dim, time_dim)
@@ -329,49 +333,94 @@ class Unet(Module):
 
         # attention
 
-        if not full_attn:
+        if not full_attn:       # 输出(False, False, False, True),默认仅在最高分辨率最低的深层使用完整注意力，以平衡计算效率和模型性能。
             full_attn = (*((False,) * (len(dim_mults) - 1)), True)
 
-        num_stages = len(dim_mults)
-        full_attn  = cast_tuple(full_attn, num_stages)
-        attn_heads = cast_tuple(attn_heads, num_stages)
-        attn_dim_head = cast_tuple(attn_dim_head, num_stages)
+        num_stages = len(dim_mults)     # 输出dim_mults的长度
+        full_attn  = cast_tuple(full_attn, num_stages)  # 将full_attn转换为长度为num_stages的元组，比如输入full_attn = 4，num_stages=3，输出(4, 4, 4)
+        attn_heads = cast_tuple(attn_heads, num_stages)   # 将attn_heads转换为长度为num_stages的元组
+        attn_dim_head = cast_tuple(attn_dim_head, num_stages)  # 将attn_dim_head转换为长度为num_stages的元组
 
-        assert len(full_attn) == len(dim_mults)
+        assert len(full_attn) == len(dim_mults)     # 断言full_attn和dim_mults的长度相同,不同会报错
 
         # prepare blocks
 
-        FullAttention = partial(Attention, flash = flash_attn)
+        FullAttention = partial(Attention, flash = flash_attn)  # 用于部分应用（partially apply）一个函数或类构造函数，固定某些参数，生成新的可调用对象
         resnet_block = partial(ResnetBlock, time_emb_dim = time_dim, dropout = dropout)
 
-        # layers
+        """
+        若 flash_attn=True，则启用 Flash Attention
+        attn_layer = FullAttention(dim=64, heads=8)
+        等价于
+        attn_layer = Attention(dim=64, heads=8, flash=True)
+        """
 
-        self.downs = ModuleList([])
-        self.ups = ModuleList([])
-        num_resolutions = len(in_out)
+        # layers
+        """
+        下采样：通过降低特征图的分辨率（如高度和宽度减半），同时增加通道数，提取更高层次的语义信息。
+        上采样：通过增加特征图的分辨率（如高度和宽度加倍），同时减少通道数，恢复到原始分辨率，同时保留更多细节。
+        示例说明：
+        假设输入图像的分辨率为 256x256，通道数为 3（RGB图像），UNet 的下采样和上采样路径如下：
+
+        下采样路径  -------- 压缩，忽略细节
+        层级 0：
+        输入：[B, 3, 256, 256]
+        下采样：[B, 64, 128, 128]
+
+        层级 1：
+        输入：[B, 64, 128, 128]
+        下采样：[B, 128, 64, 64]
+
+        层级 2：
+        输入：[B, 128, 64, 64]
+        下采样：[B, 256, 32, 32]
+
+        上采样路径  -------- 解压，恢复细节
+        层级 2：
+        输入：[B, 256, 32, 32]
+        上采样：[B, 128, 64, 64]
+
+        层级 1：
+        输入：[B, 128, 64, 64]
+        上采样：[B, 64, 128, 128]
+
+        层级 0：
+        输入：[B, 64, 128, 128]
+        上采样：[B, 3, 256, 256]
+
+        跨层连接
+        上采样路径的每一层会与下采样路径的对应层进行特征拼接（torch.cat），融合低层次和高层次特征。
+        """
+        
+        self.downs = ModuleList([])     # 定义一个ModuleList，用于存储下采样块
+        self.ups = ModuleList([])       # 定义一个ModuleList，用于存储上采样块
+        num_resolutions = len(in_out)   # 输出in_out的长度,总下采样次数
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(in_out, full_attn, attn_heads, attn_dim_head)):
-            is_last = ind >= (num_resolutions - 1)
+            is_last = ind >= (num_resolutions - 1)  # 判断是否是最后一层,is_last是bool类型，判断ind是否大于等于num_resolutions - 1
 
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+            attn_klass = FullAttention if layer_full_attn else LinearAttention  # 如果layer_full_attn为True，则使用FullAttention，否则使用LinearAttention
 
+            # 将resnet_block、attn_klass、Downsample或nn.Conv2d添加到self.downs下采样列表中
             self.downs.append(ModuleList([
-                resnet_block(dim_in, dim_in),
-                resnet_block(dim_in, dim_in),
-                attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads),
-                Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)
+                resnet_block(dim_in, dim_in),   # 输入维度为dim_in，输出维度为dim_in
+                resnet_block(dim_in, dim_in),   # 输入维度为dim_in，输出维度为dim_in
+                attn_klass(dim_in, dim_head = layer_attn_dim_head, heads = layer_attn_heads),   # 注意力层，输入维度为dim_in，注意力头的维度为layer_attn_dim_head，注意力头的数量为layer_attn_heads
+                Downsample(dim_in, dim_out) if not is_last else nn.Conv2d(dim_in, dim_out, 3, padding = 1)  # 如果is_last为False，则使用下采样，否则使用卷积层
             ]))
 
-        mid_dim = dims[-1]
-        self.mid_block1 = resnet_block(mid_dim, mid_dim)
+        # 处理中间层
+        mid_dim = dims[-1]  # 获取最深层的特征维度
+        self.mid_block1 = resnet_block(mid_dim, mid_dim)    # 看完resnet_block的代码再说
         self.mid_attn = FullAttention(mid_dim, heads = attn_heads[-1], dim_head = attn_dim_head[-1])
         self.mid_block2 = resnet_block(mid_dim, mid_dim)
 
         for ind, ((dim_in, dim_out), layer_full_attn, layer_attn_heads, layer_attn_dim_head) in enumerate(zip(*map(reversed, (in_out, full_attn, attn_heads, attn_dim_head)))):
             is_last = ind == (len(in_out) - 1)
 
-            attn_klass = FullAttention if layer_full_attn else LinearAttention
+            attn_klass = FullAttention if layer_full_attn else LinearAttention  # 如果layer_full_attn为True，则使用FullAttention，否则使用LinearAttention
 
+            # 将resnet_block、attn_klass、Upsample或nn.Conv2d添加到self.ups上采样列表中
             self.ups.append(ModuleList([
                 resnet_block(dim_out + dim_in, dim_out),
                 resnet_block(dim_out + dim_in, dim_out),
@@ -379,58 +428,67 @@ class Unet(Module):
                 Upsample(dim_out, dim_in) if not is_last else  nn.Conv2d(dim_out, dim_in, 3, padding = 1)
             ]))
 
-        default_out_dim = channels * (1 if not learned_variance else 2)
-        self.out_dim = default(out_dim, default_out_dim)
+        default_out_dim = channels * (1 if not learned_variance else 2)  # 如果需要学习方差，则输出维度为channels * 2，否则为channels
+        self.out_dim = default(out_dim, default_out_dim)  # 输出维度，如果out_dim为None，则输出default_out_dim，否则输出out_dim
 
-        self.final_res_block = resnet_block(init_dim * 2, init_dim)
-        self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)
+        # 处理最终层
+        self.final_res_block = resnet_block(init_dim * 2, init_dim)  # 
+        self.final_conv = nn.Conv2d(init_dim, self.out_dim, 1)  # 
 
-    @property
+    """
+    属性的调用：
+    如果method是一个属性，则可以直接调用，不需要加括号
+    如果method是一个方法，则需要加括号
+    """
+    @property   # 定义一个属性，用于获取下采样因子
     def downsample_factor(self):
-        return 2 ** (len(self.downs) - 1)
-
-    def forward(self, x, time, x_self_cond = None):
+        return 2 ** (len(self.downs) - 1)  # 下采样因子，2的幂次，len(self.downs) - 1表示下采样次数
+    
+    # 定义一个方法，用于前向传播
+    def forward(self, x, time, x_self_cond = None):     # 参数分别是输入图像x，时间time，自条件x_self_cond
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
+        # 断言，确保输入的维度是下采样因子的倍数，否则会报错
+        if self.self_condition:     # 如果使用自条件，则将自条件和输入图像拼接
+            x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))     # 如果输入的自条件为None，则生成一个和输入图像x相同大小的全0张量，否则输入x_self_cond，也就是上一步预测结果
+            x = torch.cat((x_self_cond, x), dim = 1)     # 将自条件和输入图像拼接，dim=1表示在通道维度上拼接
 
-        if self.self_condition:
-            x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))
-            x = torch.cat((x_self_cond, x), dim = 1)
+        x = self.init_conv(x)   # 初始化卷积层，输入图像x，输出卷积后的图像x
+        r = x.clone()    # 克隆输入图像x，用于存储中间结果  
 
-        x = self.init_conv(x)
-        r = x.clone()
+        t = self.time_mlp(time)    # 时间嵌入，输入时间time，输出时间嵌入t
 
-        t = self.time_mlp(time)
+        h = []    # 定义一个列表，用于存储中间结果
 
-        h = []
-
+        # 遍历下采样块
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, t)
-            h.append(x)
+            x = block1(x, t)    # block在前面已经实例化了，这里是调用block了。而ResnetBlock直接调用了forward，这是因为nn.Module 实现了 __call__ ，方法__call__ 方法内部会调用 forward
+            h.append(x)    # 将 x 添加到 h 列表中，用于存储中间结果
 
-            x = block2(x, t)
-            x = attn(x) + x
-            h.append(x)
+            x = block2(x, t)    # 输入 x 通过第二个残差块 block2，同时注入时间条件 t
+            x = attn(x) + x    # 对 x 进行注意力机制 attn，然后将结果与 x 相加
+            h.append(x)    # 将 x 添加到 h 列表中，用于存储中间结果
 
-            x = downsample(x)
+            x = downsample(x)   # 下采样，输入x，输出下采样后的图像x
 
-        x = self.mid_block1(x, t)
-        x = self.mid_attn(x) + x
-        x = self.mid_block2(x, t)
+        x = self.mid_block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
+        x = self.mid_attn(x) + x    # 对x进行注意力机制，然后将结果与x相加
+        x = self.mid_block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
 
+        # 遍历上采样块
         for block1, block2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim = 1)
-            x = block1(x, t)
+            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接，dim=1表示在通道维度上拼接
+            x = block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
 
-            x = torch.cat((x, h.pop()), dim = 1)
-            x = block2(x, t)
-            x = attn(x) + x
+            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接，dim=1表示在通道维度上拼接
+            x = block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
+            x = attn(x) + x    # 对x进行注意力机制，然后将结果与x相加
 
-            x = upsample(x)
+            x = upsample(x)    # 上采样，输入x，输出上采样后的图像x
 
-        x = torch.cat((x, r), dim = 1)
+        x = torch.cat((x, r), dim = 1)    # 将原始图像r和上采样后的图像x拼接，dim=1表示在通道维度上拼接
 
-        x = self.final_res_block(x, t)
-        return self.final_conv(x)
+        x = self.final_res_block(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
+        return self.final_conv(x)    # 输入x，输出卷积后的图像x
 
 # gaussian diffusion trainer class
 
