@@ -60,59 +60,59 @@ def identity(t, *args, **kwargs):  # 返回t
 def cycle(dl):  # 无限循环数据加载器
     while True:
         for data in dl:
-            yield data
+            yield data      # 生成器， 相当于return data
 
-def has_int_squareroot(num):
+def has_int_squareroot(num):        # 判断num是否为整数的平方根
     return (math.sqrt(num) ** 2) == num
 
-def num_to_groups(num, divisor):
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
+def num_to_groups(num, divisor):    # 例如num=10, divisor=3，输出[3, 3, 3, 1]
+    groups = num // divisor    # 取整
+    remainder = num % divisor   # 取余
+    arr = [divisor] * groups    
     if remainder > 0:
         arr.append(remainder)
     return arr
 
-def convert_image_to_fn(img_type, image):
+def convert_image_to_fn(img_type, image):       # 将image转换为img_type类型
     if image.mode != img_type:
         return image.convert(img_type)
     return image
 
 # normalization functions
 
-def normalize_to_neg_one_to_one(img):
+def normalize_to_neg_one_to_one(img):    # [0, 1] 归一化到 [-1, 1]
     return img * 2 - 1
 
-def unnormalize_to_zero_to_one(t):
+def unnormalize_to_zero_to_one(t):    # [-1, 1] 归一化到 [0, 1]
     return (t + 1) * 0.5
 
 # small helper modules
 
 def Upsample(dim, dim_out = None):
-    return nn.Sequential(
-        nn.Upsample(scale_factor = 2, mode = 'nearest'),
-        nn.Conv2d(dim, default(dim_out, dim), 3, padding = 1)
+    return nn.Sequential(               # nn.Sequential是一个有序的容器，用于将多个模块按顺序组合在一起,在这里会先执行上采样，然后进行卷积操作
+        nn.Upsample(scale_factor = 2, mode = 'nearest'),        # 调用nn.Upsample，将输入的图像放大2倍，使用最近邻插值法
+        nn.Conv2d(dim, default(dim_out, dim), 3, padding = 1)   # 调用nn.Conv2d，将输入的图像进行卷积操作，输出通道数为default(dim_out, dim)，卷积核大小为3，填充为1
     )
 
 def Downsample(dim, dim_out = None):
     return nn.Sequential(
-        Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),
-        nn.Conv2d(dim * 4, default(dim_out, dim), 1)
+        Rearrange('b c (h p1) (w p2) -> b (c p1 p2) h w', p1 = 2, p2 = 2),    # b c (h p1) (w p2)  分别指的是batch_size, channels, height, width；这个重排将c->(c p1 p2)，(h p1)->h，(w p2)->w, 由于p1=2, p2=2, 所以通道数增加4倍，宽高减半
+        nn.Conv2d(dim * 4, default(dim_out, dim), 1)    # 调用nn.Conv2d，将输入的图像进行卷积操作，输出通道数为default(dim_out, dim)，卷积核大小为1
     )
 
-class RMSNorm(Module):
+class RMSNorm(Module):       # 实现一种基于均方根（Root Mean Square）的归一化方法。
     def __init__(self, dim):
         super().__init__()
-        self.scale = dim ** 0.5
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        self.scale = dim ** 0.5     # 缩放因子  
+        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))    # 可训练的参数，用于调整归一化后的结果
 
     def forward(self, x):
-        return F.normalize(x, dim = 1) * self.g * self.scale
+        return F.normalize(x, dim = 1) * self.g * self.scale    # \frac{x_i}{\sqrt{\sum(x_i^2)} + epsilon}
 
 # sinusoidal positional embeds
 
-class SinusoidalPosEmb(Module):
-    def __init__(self, dim, theta = 10000):
+class SinusoidalPosEmb(Module):         # 正弦位置编码（Sinusoidal Positional Embedding） 模块，用于将离散的时间步（timestep）映射为连续的特征表示。
+    def __init__(self, dim, theta = 10000):     # dim: 输入张量的维度，theta: 控制波长分布的常数
         super().__init__()
         self.dim = dim
         self.theta = theta
@@ -120,28 +120,39 @@ class SinusoidalPosEmb(Module):
     def forward(self, x):
         device = x.device
         half_dim = self.dim // 2
-        emb = math.log(self.theta) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        emb = math.log(self.theta) / (half_dim - 1)     
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)       # 生成一组频率值，用于控制正弦函数的波长。torch.arange和python的range类似，都是生成一个从0到half_dim-1的序列
+        emb = x[:, None] * emb[None, :]         # x[:, None]指的是在x插入一个新的维度，这里就是在列插入，于是原本的x的形状是(10,)，现在变成了(10, 1)，而emb[None, :]指的是在emb插入一个新的维度，这里就是在行插入，于是原本的emb的形状是(5,)，现在变成了(1, 5)，于是x[:, None] * emb[None, :]的形状是(10, 5)。
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)  # 将正弦和余弦部分拼接在一起，形成最终的正弦位置编码。
         return emb
 
+# 如果使用了随机或者自学习正弦条件
+"""
+为什么需要拼接：
+1. 原始时间步的局限性：
+    单独使用原始时间步 x 作为条件信息，可能无法充分表达时间步的复杂关系，尤其是在扩散模型中，时间步的变化对噪声分布的影响是非线性的。
+2. 正弦/余弦编码的补充： 
+    正弦/余弦编码通过多尺度的频率特征，能够捕捉时间步的周期性变化和非线性关系，但单独使用可能会丢失原始时间步的直接信息。
+3. 拼接的优势：
+    将两者拼接在一起，既保留了原始时间步的直接信息，又引入了多尺度的频率特征，形成一种 混合编码，能够更全面地表达时间步的信息。
+"""
 class RandomOrLearnedSinusoidalPosEmb(Module):
     """ following @crowsonkb 's lead with random (learned optional) sinusoidal pos emb """
     """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
 
     def __init__(self, dim, is_random = False):
         super().__init__()
-        assert divisible_by(dim, 2)
+        assert divisible_by(dim, 2)     # 断言dim是否能被2整除，不能整除会报错
         half_dim = dim // 2
-        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)
-
+        self.weights = nn.Parameter(torch.randn(half_dim), requires_grad = not is_random)    # 生成权重参数：先生成half_dim个0-1之间的随机数，默认使用梯度，也就是参数是可训练的，否则参数是不可训练的，即参数是不变的。
+        
     def forward(self, x):
-        x = rearrange(x, 'b -> b 1')
-        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
-        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)
-        fouriered = torch.cat((x, fouriered), dim = -1)
+        x = rearrange(x, 'b -> b 1')    # 将x的形状从(b,)变为(b, 1)
+        freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi    # 将x与权重相乘，得到频率值
+        fouriered = torch.cat((freqs.sin(), freqs.cos()), dim = -1)    # 将正弦和余弦部分拼接在一起，形成最终的正弦位置编码。
+        fouriered = torch.cat((x, fouriered), dim = -1)    # 将x与fouriered拼接在一起，形成最终的正弦位置编码。
         return fouriered
+    
 
 # building block modules
 
