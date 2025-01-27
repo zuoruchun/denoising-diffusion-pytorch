@@ -155,96 +155,108 @@ class RandomOrLearnedSinusoidalPosEmb(Module):
     
 
 # building block modules
-
+# 残差块
 class Block(Module):
-    def __init__(self, dim, dim_out, dropout = 0.):
+    def __init__(self, dim, dim_out, dropout = 0.):     # 初始化模型参数
         super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)
-        self.norm = RMSNorm(dim_out)
-        self.act = nn.SiLU()
-        self.dropout = nn.Dropout(dropout)
+        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)     # 卷积层，输入维度为dim，输出维度为dim_out，卷积核大小为3，填充为1
+        self.norm = RMSNorm(dim_out)    # 归一化层，输入维度为dim_out
+        self.act = nn.SiLU()    # 激活函数，使用SiLU（Sigmoid Linear Unit）激活函数
+        self.dropout = nn.Dropout(dropout)    # 随机失活层，dropout率为dropout
 
-    def forward(self, x, scale_shift = None):
-        x = self.proj(x)
-        x = self.norm(x)
+    def forward(self, x, scale_shift = None):       # 调用初始化函数，进行前向传播
+        x = self.proj(x)        # 卷积操作
+        x = self.norm(x)        # 归一化操作
 
-        if exists(scale_shift):
+        if exists(scale_shift):  # 如果存在缩放和偏移，则将缩放和偏移应用到x上
             scale, shift = scale_shift
             x = x * (scale + 1) + shift
 
-        x = self.act(x)
-        return self.dropout(x)
+        x = self.act(x)    # 使用SiLU激活函数
+        return self.dropout(x)    # 使用dropout
 
+# 残差块
 class ResnetBlock(Module):
     def __init__(self, dim, dim_out, *, time_emb_dim = None, dropout = 0.):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.SiLU(),
             nn.Linear(time_emb_dim, dim_out * 2)
-        ) if exists(time_emb_dim) else None
+        ) if exists(time_emb_dim) else None     # 如果存在时间嵌入，则使用时间嵌入，先执行SiLU激活函数，然后执行线性层，输出维度为dim_out * 2
 
-        self.block1 = Block(dim, dim_out, dropout = dropout)
-        self.block2 = Block(dim_out, dim_out)
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+        self.block1 = Block(dim, dim_out, dropout = dropout)    # 利用Block，初始化block1   
+        self.block2 = Block(dim_out, dim_out)    # 利用Block，初始化block2
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()    # 如果输入维度不等于输出维度，则使用1x1卷积，否则使用恒等映射
 
     def forward(self, x, time_emb = None):
 
         scale_shift = None
-        if exists(self.mlp) and exists(time_emb):
-            time_emb = self.mlp(time_emb)
-            time_emb = rearrange(time_emb, 'b c -> b c 1 1')
-            scale_shift = time_emb.chunk(2, dim = 1)
+        if exists(self.mlp) and exists(time_emb):       # mlp的存在: 取决于创建实例化ResnetBlock时是否传入time_emb_dim。
+            time_emb = self.mlp(time_emb)           # 将时间嵌入通过mlp，得到缩放和偏移
+            time_emb = rearrange(time_emb, 'b c -> b c 1 1')    # 将时间嵌入的形状从(b, c)变为(b, c, 1, 1)
+            scale_shift = time_emb.chunk(2, dim = 1)    # 将时间嵌入的形状从(b, c, 1, 1)变为(b, c//2, 1, 1)和(b, c//2, 1, 1)
 
-        h = self.block1(x, scale_shift = scale_shift)
+        h = self.block1(x, scale_shift = scale_shift)    # 调用block1，输入x，scale_shift为scale_shift
 
-        h = self.block2(h)
+        h = self.block2(h)       # 调用block2，输入h
 
-        return h + self.res_conv(x)
+        return h + self.res_conv(x)    # 返回h + res_conv(x)
 
+# 线性注意力通过减少计算复杂度来加速注意力计算，同时保持对全局信息的捕捉能力。
+## 在下面每一步的步骤后面注释一下当前变量的维度
 class LinearAttention(Module):
     def __init__(
         self,
-        dim,
-        heads = 4,
-        dim_head = 32,
-        num_mem_kv = 4
+        dim,    # 输入维度
+        heads = 4,    # 注意力头的数量，多头注意力机制允许模型同时关注不同的特征子空间。
+        dim_head = 32,    # 注意力头的维度
+        num_mem_kv = 4    # 记忆键值对的数量
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
-        self.heads = heads
-        hidden_dim = dim_head * heads
+        self.scale = dim_head ** -0.5    # 用于缩放注意力分数，防止点积过大导致梯度不稳定。
+        self.heads = heads    # 注意力头的数量
+        hidden_dim = dim_head * heads    # 计算多头注意力的总维度
 
-        self.norm = RMSNorm(dim)
+        self.norm = RMSNorm(dim)    # 对输入特征进行 RMS 归一化，稳定训练过程。
 
-        self.mem_kv = nn.Parameter(torch.randn(2, heads, dim_head, num_mem_kv))
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
+        self.mem_kv = nn.Parameter(torch.randn(2, heads, dim_head, num_mem_kv))    # 定义可学习的记忆键值对。这些键值对与输入无关，用于增强注意力的表达能力。mem_kv:(2, heads, dim_head, num_mem_kv)
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)    # 将输入特征投影为查询（Q）、键（K）和值（V）。输出通道数为 hidden_dim * 3，因为 Q、K、V 各占一部分。经过to_qkv之后张量的变化：(b, c, h, w)  --to_qkv--> (b, hidden_dim * 3, h, w)
 
         self.to_out = nn.Sequential(
-            nn.Conv2d(hidden_dim, dim, 1),
-            RMSNorm(dim)
+            nn.Conv2d(hidden_dim, dim, 1),    # 将多头注意力结果投影回原始维度
+            RMSNorm(dim)    # 对输出特征进行 RMS 归一化，稳定训练过程。
         )
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, h, w = x.shape    # x:(b, c, h, w)
 
-        x = self.norm(x)
+        x = self.norm(x)    # 归一化处理。x:(b, c, h, w)  --norm--> x:(b, c, h, w)
 
-        qkv = self.to_qkv(x).chunk(3, dim = 1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
+        qkv = self.to_qkv(x).chunk(3, dim = 1)    # x:(b, c, h, w)  --to_qkv--> qkv:(b, hidden_dim * 3, h, w) --chunk--> qkv:(b, hidden_dim, h, w) * 3
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)    # 对qkv进行rearrange操作。qkv:(b, hidden_dim, h, w) * 3  --rearrange--> q:(b, heads, dim_head, h*w) ， k:(b,heads,  dim_head, h*w) ， v:(b, heads, dim_head, h*w)
+        """
+        map(lambda x, y: x + y, [1, 3, 5, 7, 9], [2, 4, 6, 8, 10])-------> 计算[1+2, 3+4, 5+6, 7+8, 9+10]
+        rearrange(t, 'h (c n) -> h c n', c = 2, n = 3)-------> 将t的形状从(h, c*n)变为(h,2,3)
+        repeat(t, 'h c n -> b h c n', b = b)-------> 将t的形状从(h, c, n)变为(b, h, c, n);其中b是repeat的次数
+        在下面的repeat中，mem_kv是(2, heads, dim_head, num_mem_kv)，这个repeat是对(heads, dim_head, num_mem_kv进行repeat)，因此会出现两个张量，一个是mk，一个是mv，mk和mv的形状都是(b, heads, dim_head, num_mem_kv)
+        """
+        mk, mv = map(lambda t: repeat(t, 'h c n -> b h c n', b = b), self.mem_kv)    # 对mem_kv的(heads, dim_head, num_mem_kv)进行repeat操作。mem_kv:(2, heads, dim_head, num_mem_kv)  --repeat--> mk:(b, heads, dim_head, num_mem_kv) ， mv:(b, heads, dim_head, num_mem_kv)
+        k, v = map(partial(torch.cat, dim = -1), ((mk, k), (mv, v)))    # 将mk和k拼接成k，将mv和v拼接成v。mk:(b, heads, dim_head, num_mem_kv) + k:(b, heads, dim_head, h*w) = k:(b, heads, dim_head, h*w+num_mem_kv)
 
-        mk, mv = map(lambda t: repeat(t, 'h c n -> b h c n', b = b), self.mem_kv)
-        k, v = map(partial(torch.cat, dim = -1), ((mk, k), (mv, v)))
+        q = q.softmax(dim = -2)    # 对查询进行 softmax 操作，计算注意力分数。q:(b, heads, dim_head, h*w)
+        k = k.softmax(dim = -1)    # 对键进行 softmax 操作，计算注意力分数。k:(b, heads, dim_head, h*w+num_mem_kv)
 
-        q = q.softmax(dim = -2)
-        k = k.softmax(dim = -1)
+        q = q * self.scale    # 缩放注意力分数，防止点积过大导致梯度不稳定。  q:(b, heads, dim_head, h*w)
+        """
+        基于爱因斯坦求和约定（Einstein summation convention）。它通过字符标签来灵活地进行张量的维度缩并、转置和乘法等操作。
+        根据 einsum 的规则，会自动对所有出现在输入标签中但未出现在输出标签中的维度进行求和。
 
-        q = q * self.scale
+        """
+        context = torch.einsum('b h d n, b h e n -> b h d e', k, v)    # 对两个张量的最后一个维度（n）进行点积，并对结果进行求和。维度变化：(b, heads, dim_head, h*w+num_mem_kv) * (b, heads, dim_head, w+num_mem_kv) = (b, heads, dim_head, dim_head)
 
-        context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
-
-        out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
-        return self.to_out(out)
+        out = torch.einsum('b h d e, b h d n -> b h e n', context, q)    # 对两个张量的第三个维度（d）进行点积，并对结果进行求和。维度变化：(b, heads, dim_head, dim_head) * (b, heads, dim_head, w) = (b, heads, dim_head, w)
+        out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)    # 维度变化：(b, heads, dim_head, w)  --rearrange--> (b, heads*dim_head, h, w)
+        return self.to_out(out)    # 将输出投影回原始维度，并进行 RMS 归一化，稳定训练过程。  out:(b, heads*dim_head, h, w)  --to_out--> out:(b, c, h, w)
 
 class Attention(Module):
     def __init__(
@@ -256,31 +268,31 @@ class Attention(Module):
         flash = False
     ):
         super().__init__()
-        self.heads = heads
-        hidden_dim = dim_head * heads
+        self.heads = heads  # 注意力头的数量
+        hidden_dim = dim_head * heads    # 计算多头注意力的总维度
 
-        self.norm = RMSNorm(dim)
-        self.attend = Attend(flash = flash)
+        self.norm = RMSNorm(dim)    # 对输入特征进行 RMS 归一化，稳定训练过程。
+        self.attend = Attend(flash = flash)    # 初始化Attend类，用于注意力机制
 
-        self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+        self.mem_kv = nn.Parameter(torch.randn(2, heads, num_mem_kv, dim_head))    # 定义可学习的记忆键值对。这些键值对与输入无关，用于增强注意力的表达能力。
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)    # 将输入特征投影为查询（Q）、键（K）和值（V）。输出通道数为 hidden_dim * 3，因为 Q、K、V 各占一部分。
+        self.to_out = nn.Conv2d(hidden_dim, dim, 1)    # 将多头注意力结果投影回原始维度
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        b, c, h, w = x.shape    # 获取输入张量的形状x:(b, c, h, w)
 
-        x = self.norm(x)
+        x = self.norm(x)    # 对输入特征进行 RMS 归一化，稳定训练过程。x:(b, c, h, w)  --norm--> x:(b, c, h, w)
 
-        qkv = self.to_qkv(x).chunk(3, dim = 1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h (x y) c', h = self.heads), qkv)
+        qkv = self.to_qkv(x).chunk(3, dim = 1)      # x:(b, c, h, w)  --to_qkv--> qkv:(b, hidden_dim * 3, h, w) --chunk--> qkv:(b, hidden_dim, h, w) * 3
+        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h (x y) c', h = self.heads), qkv)    # 对qkv进行rearrange操作。qkv:(b, hidden_dim, h, w) * 3  --rearrange--> q:(b, heads, h*w, dim_head) ， k:(b,heads,  h*w, dim_head) ， v:(b, heads, h*w, dim_head)
 
-        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), self.mem_kv)
-        k, v = map(partial(torch.cat, dim = -2), ((mk, k), (mv, v)))
+        mk, mv = map(lambda t: repeat(t, 'h n d -> b h n d', b = b), self.mem_kv)    # 对mem_kv的(heads, num_mem_kv, dim_head)进行repeat操作。mem_kv:(2, heads, num_mem_kv, dim_head)  --repeat--> mk:(b, heads, num_mem_kv, dim_head) ， mv:(b, heads, num_mem_kv, dim_head)
+        k, v = map(partial(torch.cat, dim = -2), ((mk, k), (mv, v)))    # 将mk和k拼接成k，将mv和v拼接成v。mk:(b, heads, num_mem_kv, dim_head) + k:(b, heads, h*w, dim_head) = k:(b, heads, h*w+num_mem_kv, dim_head)
 
-        out = self.attend(q, k, v)
+        out = self.attend(q, k, v)    # 调用Attend类，进行注意力机制。q:(b, heads, h*w, dim_head) ， k:(b, heads, h*w+num_mem_kv, dim_head) ， v:(b, heads, h*w+num_mem_kv, dim_head)  --attend--> out:(b, heads, h*w, dim_head)        （这个没看）
 
-        out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)
-        return self.to_out(out)
+        out = rearrange(out, 'b h (x y) d -> b (h d) x y', x = h, y = w)    # 将out的形状从(b, heads, h*w, dim_head)变为(b, heads*dim_head, h, w)
+        return self.to_out(out)    # 将输出投影回原始维度，并进行 RMS 归一化，稳定训练过程。  out:(b, heads*dim_head, h, w)  --to_out--> out:(b, c, h, w)
 
 # model
 
