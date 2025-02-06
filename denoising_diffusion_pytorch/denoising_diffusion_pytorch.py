@@ -34,7 +34,7 @@ from denoising_diffusion_pytorch.version import __version__
 
 # constants
 
-ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
+ModelPrediction =  namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])        # 定义一个元组，包含两个元素，分别是pred_noise和pred_x_start，可以通过ModelPrediction.pred_noise和ModelPrediction.pred_x_start来访问
 
 # helpers functions
 
@@ -515,47 +515,48 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
 
 # gaussian diffusion trainer class
 
-def extract(a, t, x_shape):
-    b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
+def extract(a, t, x_shape):     # 用于从张量a中提取特定索引t对应的值，并将其重塑为可与x_shape广播的形状
+    b, *_ = t.shape     # 将batch_size赋值给b，其余赋值给*_
+    out = a.gather(-1, t)       # 从维度-1（最后一列）按照索引t来提取a的元素
+    return out.reshape(b, *((1,) * (len(x_shape) - 1)))     # 如果x_shape是(b, c, h, w)，则返回的形状是(b, 1, 1, 1)
 
-def linear_beta_schedule(timesteps):
+def linear_beta_schedule(timesteps):    # 扩散模型通过逐步向数据添加噪声（正向过程）并学习如何逐步去除噪声（反向过程）来生成数据。噪声调度决定了在每个时间步添加多少噪声。
     """
     linear schedule, proposed in original ddpm paper
     """
     scale = 1000 / timesteps
-    beta_start = scale * 0.0001
-    beta_end = scale * 0.02
-    return torch.linspace(beta_start, beta_end, timesteps, dtype = torch.float64)
+    beta_start = scale * 0.0001     # 正向过程中添加的噪声的初始值
+    beta_end = scale * 0.02         # 正向过程中添加的噪声的结束值
+    return torch.linspace(beta_start, beta_end, timesteps, dtype = torch.float64)       # timesteps = 1000,那么返回0.0001到0.02之间的1000个数
 
-def cosine_beta_schedule(timesteps, s = 0.008):
+def cosine_beta_schedule(timesteps, s = 0.008):     # 与线性调度不同，余弦调度通过余弦函数来调整噪声的添加量，使得噪声的添加过程更加平滑，并且在训练的早期和晚期阶段更加稳定。
     """
     cosine schedule
     as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
     """
     steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype = torch.float64) / timesteps
-    alphas_cumprod = torch.cos((t + s) / (1 + s) * math.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, 0.999)
+    t = torch.linspace(0, timesteps, steps, dtype = torch.float64) / timesteps      # 生成从 0 到 timesteps 的均匀分布的时间点，并将其归一化到 [0, 1] 区间。
+    alphas_cumprod = torch.cos((t + s) / (1 + s) * math.pi * 0.5) ** 2      # s 是一个小的偏移量，用于调整余弦函数的形状，使其在早期阶段更加平滑。
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]                 # 归一化余弦函数的值，使其在 t = 0 时为 1。
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])              # 计算每个时间点的噪声添加量，即每个时间点的 beta 值。计算公式是beta_t = 1-alpha_t/alpha_{t-1}
+    return torch.clip(betas, 0, 0.999)      # 将beta值限制在 [0, 0.999] 区间, 防止噪声添加量过大。clip函数的作用是将输入张量的元素限制在指定范围内，比如将小于0的值设置为0，大于1的值设置为1。
 
-def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1e-5):
+def sigmoid_beta_schedule(timesteps, start = -3, end = 3, tau = 1, clamp_min = 1e-5):           # 通过 Sigmoid 函数来调整噪声的添加量
     """
     sigmoid schedule
     proposed in https://arxiv.org/abs/2212.11972 - Figure 8
     better for images > 64x64, when used during training
     """
     steps = timesteps + 1
-    t = torch.linspace(0, timesteps, steps, dtype = torch.float64) / timesteps
-    v_start = torch.tensor(start / tau).sigmoid()
-    v_end = torch.tensor(end / tau).sigmoid()
-    alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, 0.999)
+    t = torch.linspace(0, timesteps, steps, dtype = torch.float64) / timesteps      # 生成从 0 到 timesteps 的均匀分布的时间点，并将其归一化到 [0, 1] 区间。
+    v_start = torch.tensor(start / tau).sigmoid()           # 通过 sigmoid 函数将起始值 start 缩放到 [0, 1] 区间。
+    v_end = torch.tensor(end / tau).sigmoid()               # 通过 sigmoid 函数将结束值 end 缩放到 [0, 1] 区间。
+    alphas_cumprod = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)       # 使用 Sigmoid 函数计算累积的 alpha 值
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]         # 归一化 alpha 值，使其在 t = 0 时为 1。
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])      # 计算每个时间点的噪声添加量，即每个时间点的 beta 值。计算公式是beta_t = 1-alpha_t/alpha_{t-1}
+    return torch.clip(betas, 0, 0.999)                          # 将beta值限制在 [0, 0.999] 区间, 防止噪声添加量过大。clip函数的作用是将输入张量的元素限制在指定范围内，比如将小于0的值设置为0，大于1的值设置为1。
 
+# 负责管理噪声的添加和去除过程
 class GaussianDiffusion(Module):
     def __init__(
         self,
@@ -574,24 +575,25 @@ class GaussianDiffusion(Module):
         min_snr_gamma = 5,
         immiscible = False
     ):
-        super().__init__()
-        assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)
-        assert not hasattr(model, 'random_or_learned_sinusoidal_cond') or not model.random_or_learned_sinusoidal_cond
+        super().__init__()          # 继承父类Module的初始化方法
+        assert not (type(self) == GaussianDiffusion and model.channels != model.out_dim)        # 断言，如果模型的通道数不等于输出维度，则报错
+        assert not hasattr(model, 'random_or_learned_sinusoidal_cond') or not model.random_or_learned_sinusoidal_cond           # 断言，如果模型有random_or_learned_sinusoidal_cond属性，则报错
 
-        self.model = model
+        self.model = model      # 传入的模型
 
-        self.channels = self.model.channels
-        self.self_condition = self.model.self_condition
+        self.channels = self.model.channels     # 传入模型的通道数
+        self.self_condition = self.model.self_condition     # 传入模型是否使用自条件
 
-        if isinstance(image_size, int):
-            image_size = (image_size, image_size)
-        assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, 'image size must be a integer or a tuple/list of two integers'
-        self.image_size = image_size
+        if isinstance(image_size, int):     # 检查image_size是否是整数
+            image_size = (image_size, image_size)           # 如果是整数，则将image_size转换为元组
+        assert isinstance(image_size, (tuple, list)) and len(image_size) == 2, 'image size must be a integer or a tuple/list of two integers'       # 判断image_size是否是元组或列表，且长度为2
+        self.image_size = image_size    # 传入的图像大小
 
-        self.objective = objective
+        self.objective = objective      # 传入的目标pred_v
 
         assert objective in {'pred_noise', 'pred_x0', 'pred_v'}, 'objective must be either pred_noise (predict noise) or pred_x0 (predict image start) or pred_v (predict v [v-parameterization as defined in appendix D of progressive distillation paper, used in imagen-video successfully])'
 
+        # 使用不同的调度函数
         if beta_schedule == 'linear':
             beta_schedule_fn = linear_beta_schedule
         elif beta_schedule == 'cosine':
@@ -601,113 +603,116 @@ class GaussianDiffusion(Module):
         else:
             raise ValueError(f'unknown beta schedule {beta_schedule}')
 
-        betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)
+        betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)       # 通过调度函数计算beta值,schedule_fn_kwargs是一个字典，用于传递给调度函数的参数。这里是一个空字典
 
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, dim=0)
-        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
+        alphas = 1. - betas     # 计算alpha值，alpha_t = 1 - beta_t
+        alphas_cumprod = torch.cumprod(alphas, dim=0)       # 计算累积alpha值，即alpha的_t
+        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)    # 计算alpha_t-1, 通过删除最后一个元素，然后在前面填充一个1
 
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
+        timesteps, = betas.shape        # 获取beta的形状,注意beta必须是一维的
+        self.num_timesteps = int(timesteps)     # 转换成整数
 
-        # sampling related parameters
+        # sampling related parameters   相关采样参数
 
-        self.sampling_timesteps = default(sampling_timesteps, timesteps) # default num sampling timesteps to number of timesteps at training
+        self.sampling_timesteps = default(sampling_timesteps, timesteps) # 如果指定了sampling_timesteps，则使用指定的值，否则使用timesteps，作为采样时间步数
 
-        assert self.sampling_timesteps <= timesteps
-        self.is_ddim_sampling = self.sampling_timesteps < timesteps
-        self.ddim_sampling_eta = ddim_sampling_eta
+        assert self.sampling_timesteps <= timesteps         # 断言，采样时间步数必须小于等于总时间步数
+        self.is_ddim_sampling = self.sampling_timesteps < timesteps     # 判断是否使用DDIM采样，即采样时间步数小于总时间步数时使用DDIM采样，否则使用正常采样（扩散过程）
+        self.ddim_sampling_eta = ddim_sampling_eta      # DDIM采样的eta值,当eta的值为0时，采样将不带有随机性。注意DDIM是一种确定性的采样方法，它通过在扩散过程中的每个时间步中添加一个小的随机扰动来实现。
 
-        # helper function to register buffer from float64 to float32
+        # helper function to register buffer from float64 to float32    将 float64 类型的数据转换为 float32，然后注册为 torch.nn.Module 的缓冲区,以便在训练过程中被保存和加载，但不会被优化器更新。
 
-        register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
+        register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))   # 创建匿名函数，将val转换为float32类型，然后注册为torch.nn.Module的缓冲区。name是缓冲区的名称，val是缓冲区的值
 
-        register_buffer('betas', betas)
-        register_buffer('alphas_cumprod', alphas_cumprod)
-        register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
+        register_buffer('betas', betas)     # 注册beta值为缓冲区
+        register_buffer('alphas_cumprod', alphas_cumprod)   # 注册累积alpha值为缓冲区
+        register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)  # 注册前一个累积alpha值为缓冲区
 
-        # calculations for diffusion q(x_t | x_{t-1}) and others
+        # calculations for diffusion q(x_t | x_{t-1}) and others    扩散 q(x_t | x_{t-1}) 和其他计算
 
-        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
-        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
-        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
+        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))      # 注册累积alpha值的平方根为缓冲区
+        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))       # 注册1减去累积alpha值的平方根为缓冲区
+        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))         # 注册1减去累积alpha值的对数为缓冲区
+        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))           # 注册累积alpha值的倒数的平方根为缓冲区
+        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))     # 注册累积alpha值的倒数减1的平方根为缓冲区
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        # calculations for posterior q(x_{t-1} | x_t, x_0)      后验 q(x_{t-1} | x_t, x_0) 的计算
 
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)         # 注册后验方差为缓冲区，计算公式是：beta_t * (1. - alpha_{t-1}) / (1. - alpha_t)
 
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
+        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)       上面的等式等于 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
 
-        register_buffer('posterior_variance', posterior_variance)
+        register_buffer('posterior_variance', posterior_variance)       # 注册后验方差为缓冲区
 
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
+        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain    下面的对数计算被截断，因为扩散链的开始处后验方差为0
 
-        register_buffer('posterior_log_variance_clipped', torch.log(posterior_variance.clamp(min =1e-20)))
-        register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
-        register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
+        register_buffer('posterior_log_variance_clipped', torch.log(posterior_variance.clamp(min =1e-20)))      # 注册截断后的后验对数方差为缓冲区,为了防止出现负无穷大的情况，将后验方差限制在1e-20以上
+        register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))    # 注册后验均值系数1为缓冲区，计算公式是：beta_t * sqrt(alpha_{t-1}) / (1. - alpha_t)
+        register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))    # 注册后验均值系数2为缓冲区，计算公式是：(1. - alpha_{t-1}) * sqrt(alpha_t) / (1. - alpha_t)
 
         # immiscible diffusion
 
-        self.immiscible = immiscible
+        self.immiscible = immiscible        # 是否使用不可混合扩散
 
-        # offset noise strength - in blogpost, they claimed 0.1 was ideal
+        # offset noise strength - in blogpost, they claimed 0.1 was ideal       偏移噪声强度 - 在博客文章中，他们声称0.1是理想的
 
         self.offset_noise_strength = offset_noise_strength
 
-        # derive loss weight
-        # snr - signal noise ratio
+        # derive loss weight        衍生损失权重
+        # snr - signal noise ratio      信噪比
 
-        snr = alphas_cumprod / (1 - alphas_cumprod)
+        snr = alphas_cumprod / (1 - alphas_cumprod)     # 计算信噪比，信噪比是alpha的累积乘积除以1减去alpha的累积乘积
 
         # https://arxiv.org/abs/2303.09556
 
-        maybe_clipped_snr = snr.clone()
-        if min_snr_loss_weight:
-            maybe_clipped_snr.clamp_(max = min_snr_gamma)
+        maybe_clipped_snr = snr.clone()     # 克隆信噪比
+        if min_snr_loss_weight:     # 如果最小信噪比损失权重为True
+            maybe_clipped_snr.clamp_(max = min_snr_gamma)       # 限制信噪比的最大值为min_snr_gamma
 
-        if objective == 'pred_noise':
+        if objective == 'pred_noise':       # 如果目标是预测噪声
             register_buffer('loss_weight', maybe_clipped_snr / snr)
-        elif objective == 'pred_x0':
+        elif objective == 'pred_x0':        # 如果目标是预测图像起始
             register_buffer('loss_weight', maybe_clipped_snr)
-        elif objective == 'pred_v':
+        elif objective == 'pred_v':         # 如果目标是预测v
             register_buffer('loss_weight', maybe_clipped_snr / (snr + 1))
 
-        # auto-normalization of data [0, 1] -> [-1, 1] - can turn off by setting it to be False
+        # auto-normalization of data [0, 1] -> [-1, 1] - can turn off by setting it to be False         数据的自动归一化[0, 1] -> [-1, 1] - 可以通过将其设置为False来关闭
 
-        self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity
-        self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity
+        self.normalize = normalize_to_neg_one_to_one if auto_normalize else identity        # 如果auto_normalize为True，则使用normalize_to_neg_one_to_one，否则使用identity
+        self.unnormalize = unnormalize_to_zero_to_one if auto_normalize else identity       # 如果auto_normalize为True，则使用unnormalize_to_zero_to_one，否则使用identity
 
     @property
-    def device(self):
+    def device(self):   # 获取betas使用的设备，gpu或cpu
         return self.betas.device
 
-    def predict_start_from_noise(self, x_t, t, noise):
+    def predict_start_from_noise(self, x_t, t, noise):      # 从噪声恢复原始图像, 即去噪. x_t表示t时刻的图像，t表示时间步，noise表示噪声
         return (
-            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
-        )
+            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -       
+            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise     # 正向过程公式 
+        )       # sqrt_recip_alphas_cumprod: 用于恢复信号. sqrt_recipm1_alphas_cumprod: 用于去噪
+    """
+    extract函数用于从张量a中提取特定索引t对应的值，并将其重塑为可与x_shape广播的形状。
+    """
 
-    def predict_noise_from_start(self, x_t, t, x0):
+    def predict_noise_from_start(self, x_t, t, x0):     # 从原始图像预测噪声
         return (
             (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)     # 通过正向过程求解噪声
         )
 
-    def predict_v(self, x_start, t, noise):
+    def predict_v(self, x_start, t, noise):         # 从噪声预测v, v是一个参数化的噪声
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * noise -
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_start
         )
 
-    def predict_start_from_v(self, x_t, t, v):
+    def predict_start_from_v(self, x_t, t, v):      # 从v预测原始图像
         return (
             extract(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
         )
 
-    def q_posterior(self, x_start, x_t, t):
+    def q_posterior(self, x_start, x_t, t):         # 计算后验分布
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
             extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -716,21 +721,22 @@ class GaussianDiffusion(Module):
         posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
+    # 通过模型预测噪声、图像起始或v，x_self_cond是自条件，clip_x_start表示是否裁剪x_start，rederive_pred_noise表示是否重新计算预测噪声      
     def model_predictions(self, x, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
-        model_output = self.model(x, t, x_self_cond)
-        maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
+        model_output = self.model(x, t, x_self_cond)        # 这个model是前面GasussianDiffusion类中传入的模型 (在下面这个output用于不同的目，这个不太懂)
+        maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity    # 如果clip_x_start为True，则使用torch.clamp函数，否则使用identity(相当于恒等函数)
 
-        if self.objective == 'pred_noise':
-            pred_noise = model_output
-            x_start = self.predict_start_from_noise(x, t, pred_noise)
-            x_start = maybe_clip(x_start)
+        if self.objective == 'pred_noise':      # 如果目标是预测噪声
+            pred_noise = model_output       # 预测噪声就是模型的输出
+            x_start = self.predict_start_from_noise(x, t, pred_noise)       # 从噪声恢复原始图像
+            x_start = maybe_clip(x_start)       # 如果clip_x_start为True，则裁剪x_start
 
-            if clip_x_start and rederive_pred_noise:
-                pred_noise = self.predict_noise_from_start(x, t, x_start)
+            if clip_x_start and rederive_pred_noise:        # 如果clip_x_start为True且rederive_pred_noise为True
+                pred_noise = self.predict_noise_from_start(x, t, x_start)       # 重新计算预测噪声
 
-        elif self.objective == 'pred_x0':
-            x_start = model_output
-            x_start = maybe_clip(x_start)
+        elif self.objective == 'pred_x0':       # 如果目标是预测原始图像
+            x_start = model_output      # 预测图像起始就是模型的输出
+            x_start = maybe_clip(x_start)       
             pred_noise = self.predict_noise_from_start(x, t, x_start)
 
         elif self.objective == 'pred_v':
@@ -739,16 +745,16 @@ class GaussianDiffusion(Module):
             x_start = maybe_clip(x_start)
             pred_noise = self.predict_noise_from_start(x, t, x_start)
 
-        return ModelPrediction(pred_noise, x_start)
+        return ModelPrediction(pred_noise, x_start)     # 输出预测噪声和图像起始，可以通过ModelPrediction.pred_x_start和输出预测噪声和图像起始，可以通过ModelPrediction.pred_noise调用他
 
-    def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
-        preds = self.model_predictions(x, t, x_self_cond)
+    def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):      # 计算模型的均值和方差
+        preds = self.model_predictions(x, t, x_self_cond)       # 通过模型预测噪声、图像起始或v
         x_start = preds.pred_x_start
 
-        if clip_denoised:
+        if clip_denoised:       # 如果clip_denoised为True，则裁剪去噪后的图像
             x_start.clamp_(-1., 1.)
 
-        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)
+        model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)        # 通过后验分布计算模型的均值和方差
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
     @torch.inference_mode()

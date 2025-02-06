@@ -1,55 +1,55 @@
 import torch
 import torch.nn as nn
-from functools import partial
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.scale = dim ** 0.5
-        self.g = nn.Parameter(torch.ones(dim))
+def extract(a, t, x_shape):
+    b, *_ = t.shape
+    out = a.gather(-1, t)
+    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
-    def forward(self, x):
-        return x * self.g / (x.norm(2, dim=1, keepdim=True) * self.scale + 1e-8)
+class DenoisingTest:
+    def __init__(self, timesteps=1000):
+        # 模拟alphas系数
+        betas = torch.linspace(0.0001, 0.02, timesteps)
+        alphas = 1. - betas
+        alphas_cumprod = torch.cumprod(alphas, dim=0)
+        
+        # 计算需要的系数
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1. / alphas_cumprod)
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / alphas_cumprod - 1)
 
-class Block(nn.Module):
-    def __init__(self, dim, dim_out, dropout = 0.):
-        super().__init__()
-        self.proj = nn.Conv2d(dim, dim_out, 3, padding = 1)
-        self.norm = RMSNorm(dim_out)
-        self.act = nn.SiLU()
-        self.dropout = nn.Dropout(dropout)
+    def predict_start_from_noise(self, x_t, t, noise):
+        return (
+            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
+            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+        )
 
-    def forward(self, x, scale_shift = None):
-        print("x.shape:",x.shape)
-        x = self.proj(x)
-        print("after proj:",x.shape)
-        x = self.norm(x)
-        print("after norm:",x.shape)
-        if scale_shift is not None:
-            scale, shift = scale_shift
-            x = x * (scale + 1) + shift
-        x = self.act(x)
-        print("after act:",x.shape)
-        x = self.dropout(x)
-        print("after dropout:",x.shape)
-        return x
+def main():
+    # 创建测试实例
+    model = DenoisingTest()
+    
+    # 创建测试数据
+    batch_size = 2
+    channels = 3
+    height = width = 4  # 使用小尺寸便于展示
+    
+    # 创建噪声图像和时间步
+    x_t = torch.randn(batch_size, channels, height, width)
+    t = torch.tensor([100, 500])  # 两个不同的时间步
+    noise = torch.randn_like(x_t)
+    
+    print("输入形状:")
+    print(f"x_t shape: {x_t.shape}")
+    print(f"t shape: {t.shape}")
+    print(f"noise shape: {noise.shape}")
+    
+    # 执行预测
+    x_0_pred = model.predict_start_from_noise(x_t, t, noise)
+    print(f"\n预测输出 x_0 shape: {x_0_pred.shape}")
+    
+    # 展示系数
+    print("\n提取的系数:")
+    print(f"sqrt_recip_alphas_cumprod: {extract(model.sqrt_recip_alphas_cumprod, t, x_t.shape)}")
+    print(f"sqrt_recipm1_alphas_cumprod: {extract(model.sqrt_recipm1_alphas_cumprod, t, x_t.shape)}")
 
 if __name__ == "__main__":
-    # 创建测试数据
-    batch_size = 1
-    channels = 3
-    height = 256
-    width = 256
-    x = torch.randn(batch_size, channels, height, width)
-    print("Input shape:", x.shape)
-
-    # 测试Block
-    block = Block(dim=3, dim_out=64)
-    output = block(x)
-    print("Output shape:", output.shape)
-
-    # # 测试带scale_shift的情况
-    # scale = torch.randn_like(output)
-    # shift = torch.randn_like(output)
-    # output_with_scale_shift = block(x, (scale, shift))
-    # print("Output shape with scale_shift:", output_with_scale_shift.shape)
+    main()
