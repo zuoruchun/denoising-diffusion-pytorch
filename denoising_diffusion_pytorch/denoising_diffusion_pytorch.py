@@ -757,175 +757,175 @@ class GaussianDiffusion(Module):
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start = x_start, x_t = x, t = t)        # 通过后验分布计算模型的均值和方差
         return model_mean, posterior_variance, posterior_log_variance, x_start
 
-    @torch.inference_mode()
-    def p_sample(self, x, t: int, x_self_cond = None):
-        b, *_, device = *x.shape, self.device
-        batched_times = torch.full((b,), t, device = device, dtype = torch.long)
-        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)
-        noise = torch.randn_like(x) if t > 0 else 0. # no noise if t == 0
-        pred_img = model_mean + (0.5 * model_log_variance).exp() * noise
-        return pred_img, x_start
+    @torch.inference_mode()     # `torch.inference_mode()`装饰器用于将函数标记为推理模式，以便在推理模式下运行. 推理模式下，PyTorch会关闭梯度计算，从而提高性能。
+    def p_sample(self, x, t: int, x_self_cond = None):          # 从x_t的图像采样x_{t-1}的图像
+        b, *_, device = *x.shape, self.device               # 获取batch_size，设备
+        batched_times = torch.full((b,), t, device = device, dtype = torch.long)        # 生成一个大小为batch_size的张量，值为t，用于表示时间步
+        model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)        # 计算模型的均值和方差,_表示忽略posterior_variance
+        noise = torch.randn_like(x) if t > 0 else 0. # 在t=0，即去噪的最后一步，不添加噪声
+        pred_img = model_mean + (0.5 * model_log_variance).exp() * noise        # 根据模型的均值和方差生成预测的t-1的图像
+        return pred_img, x_start        # 返回预测的t-1的图像和0时刻的图像
 
     @torch.inference_mode()
-    def p_sample_loop(self, shape, return_all_timesteps = False):
-        batch, device = shape[0], self.device
+    def p_sample_loop(self, shape, return_all_timesteps = False):           # 从随机噪声开始，逐步通过去噪过程生成最终的图像.shape：生成图像的形状，return_all_timesteps：是否返回所有时间步的图像
+        batch, device = shape[0], self.device     # 获取batch_size，设备
 
-        img = torch.randn(shape, device = device)
-        imgs = [img]
+        img = torch.randn(shape, device = device)               # 生成随机噪声
+        imgs = [img]            # 用于存储生成的图像
 
-        x_start = None
+        x_start = None      # 初始化x_start
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, t, self_cond)
-            imgs.append(img)
+        for t in tqdm(reversed(range(0, self.num_timesteps)), desc = 'sampling loop time step', total = self.num_timesteps):    # 使用tqdm显示进度条,desc是描述文本
+            self_cond = x_start if self.self_condition else None        # 如果使用自条件，则使用上一步预测的x_start作为条件，否则为None
+            img, x_start = self.p_sample(img, t, self_cond)     # 通过p_sample方法生成x_{t-1}和x_start
+            imgs.append(img)        # 将生成的图像添加到imgs列表中
 
-        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)  # 如果return_all_timesteps为False，则返回最终的图像，否则返回所有时间步的图像, dim=1表示在通道维度上拼接
 
-        ret = self.unnormalize(ret)
-        return ret
+        ret = self.unnormalize(ret)     # 反归一化到[0, 1]区间
+        return ret  # 最终返回的是生成的图像
 
-    @torch.inference_mode()
-    def ddim_sample(self, shape, return_all_timesteps = False):
-        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+    @torch.inference_mode()             # 推理模式,关闭梯度计算
+    def ddim_sample(self, shape, return_all_timesteps = False):         # DDIM采样,shape：生成图像的形状，return_all_timesteps：是否返回所有时间步的图像
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective     # 获取batch_size，设备，总时间步数，采样时间步数，eta值，目标(pred_noise、pred_x0 或 pred_v)
 
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
-        times = list(reversed(times.int().tolist()))
+        times = list(reversed(times.int().tolist()))        # 逆转时间步，并转换为列表[T-1, T-2, ..., 1, 0, -1]
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
 
-        img = torch.randn(shape, device = device)
-        imgs = [img]
+        img = torch.randn(shape, device = device)       # 生成随机噪声
+        imgs = [img]        # 用于存储生成的图像
 
-        x_start = None
+        x_start = None      # 初始化x_start
 
-        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
-            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
-            self_cond = x_start if self.self_condition else None
-            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):      # 使用tqdm显示进度条,desc是描述文本
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)     # 生成一个大小为batch_size的张量，值为time，用于表示时间步
+            self_cond = x_start if self.self_condition else None        # 如果使用自条件，则使用上一步预测的x_start作为条件，否则为None
+            pred_noise, x_start, *_ = self.model_predictions(img, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)        # 通过模型预测噪声、图像起始或v
 
-            if time_next < 0:
+            if time_next < 0:       # 处理最后一个时间步
                 img = x_start
                 imgs.append(img)
                 continue
 
-            alpha = self.alphas_cumprod[time]
-            alpha_next = self.alphas_cumprod[time_next]
+            alpha = self.alphas_cumprod[time]   # 计算当前时间步的累积alpha值
+            alpha_next = self.alphas_cumprod[time_next]     # 计算下一个时间步的累积alpha值
 
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()       # 计算噪声标准差
+            c = (1 - alpha_next - sigma ** 2).sqrt()        # 计算c值
 
-            noise = torch.randn_like(img)
+            noise = torch.randn_like(img)   # 生成噪声
 
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
-                  sigma * noise
+                  sigma * noise     # 通过DDIM采样生成图像
 
-            imgs.append(img)
+            imgs.append(img)    # 将生成的图像添加到imgs列表中
 
-        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        ret = img if not return_all_timesteps else torch.stack(imgs, dim = 1)       # 如果return_all_timesteps为False，则返回最终的图像，否则返回所有时间步的图像, dim=1表示在通道维度上拼接
 
-        ret = self.unnormalize(ret)
-        return ret
+        ret = self.unnormalize(ret)     # 反归一化到[0, 1]区间
+        return ret    # 最终返回的是生成的图像
+
+    @torch.inference_mode()     # 推理模式,关闭梯度计算
+    def sample(self, batch_size = 16, return_all_timesteps = False):    # 根据配置，选择使用DDIM采样或正常采样生成图像.
+        (h, w), channels = self.image_size, self.channels       # 获取图像大小和通道数
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample       # 如果不使用DDIM采样，则使用p_sample_loop方法
+        return sample_fn((batch_size, channels, h, w), return_all_timesteps = return_all_timesteps)     # 生成图像
 
     @torch.inference_mode()
-    def sample(self, batch_size = 16, return_all_timesteps = False):
-        (h, w), channels = self.image_size, self.channels
-        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        return sample_fn((batch_size, channels, h, w), return_all_timesteps = return_all_timesteps)
+    def interpolate(self, x1, x2, t = None, lam = 0.5):     # 对两个图像x1,x2进行插值，用于图像的平滑过渡. x1和x2是两个图像，t是时间步，lam是插值系数
+        b, *_, device = *x1.shape, x1.device    # 获取batch_size，设备
+        t = default(t, self.num_timesteps - 1)      # 如果没有指定时间步，则使用总时间步数减1
 
-    @torch.inference_mode()
-    def interpolate(self, x1, x2, t = None, lam = 0.5):
-        b, *_, device = *x1.shape, x1.device
-        t = default(t, self.num_timesteps - 1)
+        assert x1.shape == x2.shape     # 断言，x1和x2的形状必须相同
 
-        assert x1.shape == x2.shape
+        t_batched = torch.full((b,), t, device = device)        # 生成一个大小为batch_size的张量，值为t，用于表示时间步
+        xt1, xt2 = map(lambda x: self.q_sample(x, t = t_batched), (x1, x2))     # 将图像x1和x2通过q_sample加噪到t时刻
 
-        t_batched = torch.full((b,), t, device = device)
-        xt1, xt2 = map(lambda x: self.q_sample(x, t = t_batched), (x1, x2))
-
-        img = (1 - lam) * xt1 + lam * xt2
+        img = (1 - lam) * xt1 + lam * xt2       # 对x1和x2进行插值
 
         x_start = None
 
-        for i in tqdm(reversed(range(0, t)), desc = 'interpolation sample time step', total = t):
-            self_cond = x_start if self.self_condition else None
-            img, x_start = self.p_sample(img, i, self_cond)
+        for i in tqdm(reversed(range(0, t)), desc = 'interpolation sample time step', total = t):       # 使用tqdm显示进度条,desc是描述文本。从t-1时刻开始去除噪声
+            self_cond = x_start if self.self_condition else None    # 如果使用自条件，则使用上一步预测的x_start作为条件，否则为None
+            img, x_start = self.p_sample(img, i, self_cond)     # 通过p_sample方法生成x_{t-1}和x_start
 
-        return img
+        return img      # 简言之，这个函数是对两个图像进行加噪，然后插值，最后去噪。
 
-    def noise_assignment(self, x_start, noise):
-        x_start, noise = tuple(rearrange(t, 'b ... -> b (...)') for t in (x_start, noise))
-        dist = torch.cdist(x_start, noise)
-        _, assign = linear_sum_assignment(dist.cpu())
-        return torch.from_numpy(assign).to(dist.device)
+    def noise_assignment(self, x_start, noise):     # 噪声分配，在去噪过程中，为图像分配最匹配的噪声
+        x_start, noise = tuple(rearrange(t, 'b ... -> b (...)') for t in (x_start, noise))      # 将x_start和noise从batch_size,channels,height,width的形状转换为batch_size,channels*height*width的形状
+        dist = torch.cdist(x_start, noise)          # 计算x_start和noise之间的欧氏距率
+        _, assign = linear_sum_assignment(dist.cpu())       # 使用匈牙利算法计算最佳分配
+        return torch.from_numpy(assign).to(dist.device)     # 返回分配结果
 
-    @autocast('cuda', enabled = False)
-    def q_sample(self, x_start, t, noise = None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
+    @autocast('cuda', enabled = False)      # 自动混合精度装饰器，用于混合精度训练,在cuda设备上禁用
+    def q_sample(self, x_start, t, noise = None):       # 将原始图片x_start加噪到t时刻
+        noise = default(noise, lambda: torch.randn_like(x_start))       # 如果没有指定噪声，则生成随机噪声
 
-        if self.immiscible:
-            assign = self.noise_assignment(x_start, noise)
-            noise = noise[assign]
+        if self.immiscible:     # 如果使用不可混合扩散
+            assign = self.noise_assignment(x_start, noise)      # 噪声分配
+            noise = noise[assign]    # 重新分配噪声
 
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
+        )       # 正向过程公式
 
-    def p_losses(self, x_start, t, noise = None, offset_noise_strength = None):
-        b, c, h, w = x_start.shape
+    def p_losses(self, x_start, t, noise = None, offset_noise_strength = None):     # 计算损失函数
+        b, c, h, w = x_start.shape      # 获取batch_size，通道数，高度，宽度
 
-        noise = default(noise, lambda: torch.randn_like(x_start))
+        noise = default(noise, lambda: torch.randn_like(x_start))       # 如果没有指定噪声，则生成随机噪声
 
         # offset noise - https://www.crosslabs.org/blog/diffusion-with-offset-noise
 
-        offset_noise_strength = default(offset_noise_strength, self.offset_noise_strength)
+        offset_noise_strength = default(offset_noise_strength, self.offset_noise_strength)      # 如果没有指定偏移噪声强度，则使用默认值
 
-        if offset_noise_strength > 0.:
-            offset_noise = torch.randn(x_start.shape[:2], device = self.device)
-            noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')
+        if offset_noise_strength > 0.:      # 如果偏移噪声强度大于0
+            offset_noise = torch.randn(x_start.shape[:2], device = self.device)     # 生成偏移噪声
+            noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')      # 添加偏移噪声
 
         # noise sample
 
-        x = self.q_sample(x_start = x_start, t = t, noise = noise)
+        x = self.q_sample(x_start = x_start, t = t, noise = noise)      # 将原始图片x_start加噪到t时刻
 
         # if doing self-conditioning, 50% of the time, predict x_start from current set of times
         # and condition with unet with that
         # this technique will slow down training by 25%, but seems to lower FID significantly
 
-        x_self_cond = None
-        if self.self_condition and random() < 0.5:
-            with torch.no_grad():
-                x_self_cond = self.model_predictions(x, t).pred_x_start
-                x_self_cond.detach_()
+        x_self_cond = None      # 初始化x_self_cond
+        if self.self_condition and random() < 0.5:      # 如果使用自条件，并且随机数小于0.5
+            with torch.no_grad():    # 禁用梯度计算
+                x_self_cond = self.model_predictions(x, t).pred_x_start     # 通过模型预测图像起始
+                x_self_cond.detach_()       # 分离x_self_cond
 
-        # predict and take gradient step
+        # predict and take gradient step        预测并采取梯度步骤
 
-        model_out = self.model(x, t, x_self_cond)
+        model_out = self.model(x, t, x_self_cond)       # 调用model，输入x和t，输出模型的输出
 
-        if self.objective == 'pred_noise':
-            target = noise
-        elif self.objective == 'pred_x0':
-            target = x_start
-        elif self.objective == 'pred_v':
-            v = self.predict_v(x_start, t, noise)
+        if self.objective == 'pred_noise':      # 如果目标是预测噪声
+            target = noise          # 目标是噪声
+        elif self.objective == 'pred_x0':       # 如果目标是预测图像起始
+            target = x_start        # 目标是图像起始
+        elif self.objective == 'pred_v':        # 如果目标是预测v
+            v = self.predict_v(x_start, t, noise)       # 从噪声预测v
             target = v
         else:
             raise ValueError(f'unknown objective {self.objective}')
 
-        loss = F.mse_loss(model_out, target, reduction = 'none')
-        loss = reduce(loss, 'b ... -> b', 'mean')
+        loss = F.mse_loss(model_out, target, reduction = 'none')        # 调用均方误差损失，计算模型的输出和目标之间的损失。其中reduction='none'表示不进行归一化，而是返回每个样本的loss。
+        loss = reduce(loss, 'b ... -> b', 'mean')       # 将损失进行归一化，在b维度上进行平均。输入(b,c,h,w)，输出(b,)
 
-        loss = loss * extract(self.loss_weight, t, loss.shape)
-        return loss.mean()
+        loss = loss * extract(self.loss_weight, t, loss.shape)      # 根据时间步t对损失进行权重调整
+        return loss.mean()  # 返回损失
 
-    def forward(self, img, *args, **kwargs):
-        b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size
-        assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
+    def forward(self, img, *args, **kwargs):        # forward方法，用于计算损失
+        b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size     # 获取batch_size，通道数，高度，宽度，设备，图像大小
+        assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'   # 确保图像的高度和宽度与图像大小相同
+        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()        # 随机生成batch_size个时间步t
 
-        img = self.normalize(img)
-        return self.p_losses(img, t, *args, **kwargs)
+        img = self.normalize(img)       # 正则化图像,即将图像归一化到[-1,1]
+        return self.p_losses(img, t, *args, **kwargs)       # 计算损失并返回
 
 # dataset classes
 
@@ -937,13 +937,13 @@ class Dataset(Dataset):
         exts = ['jpg', 'jpeg', 'png', 'tiff'],
         augment_horizontal_flip = False,
         convert_image_to = None
-    ):
-        super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+    ):      # 初始化Dataset类,folder为数据集路径，image_size为图像大小，exts为图像格式，augment_horizontal_flip为是否进行水平翻转，convert_image_to为图像格式转换
+        super().__init__()      # 调用父类的初始化方法
+        self.folder = folder        # 传递数据集路径
+        self.image_size = image_size        # 传递图像大小
+        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]     # lambda函数遍历exts列表中的每个扩展名，并使用Path对象遍历文件夹中的所有文件，并返回一个包含所有匹配文件的列表。
 
-        maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()
+        maybe_convert_fn = partial(convert_image_to_fn, convert_image_to) if exists(convert_image_to) else nn.Identity()        # 如果convert_image_to不为None，则创建一个lambda函数，将输入的图像转换为指定格式；否则，创建一个nn.Identity()对象，表示不进行任何转换。
 
         self.transform = T.Compose([
             T.Lambda(maybe_convert_fn),
@@ -951,12 +951,12 @@ class Dataset(Dataset):
             T.RandomHorizontalFlip() if augment_horizontal_flip else nn.Identity(),
             T.CenterCrop(image_size),
             T.ToTensor()
-        ])
+        ])      # 创建一个Compose对象，用于组合多个转换操作。
 
-    def __len__(self):
+    def __len__(self):      # __len__方法，返回数据集的长度
         return len(self.paths)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index):       # __getitem__方法，返回指定索引对应的图像
         path = self.paths[index]
         img = Image.open(path)
         return self.transform(img)
@@ -964,6 +964,32 @@ class Dataset(Dataset):
 # trainer class
 
 class Trainer:
+    """
+    初始化Trainer类
+    diffusion_model: 模型
+    folder: 数据集路径
+    **kwargs: 其他参数
+    train_batch_size: 训练批次大小
+    gradient_accumulate_every: 梯度累积次数
+    augment_horizontal_flip: 是否进行水平翻转
+    train_lr: 训练学习率
+    train_num_steps: 训练步数
+    ema_update_every: EMA更新间隔
+    ema_decay: EMA衰减率
+    adam_betas: Adam优化器的参数
+    save_and_sample_every: 保存和采样间隔
+    num_samples: 采样数量
+    results_folder: 结果保存路径
+    amp: 是否使用自动混合精度
+    mixed_precision_type: 混合精度类型
+    split_batches: 是否分割批次
+    convert_image_to: 图像格式转换
+    calculate_fid: 是否计算FID
+    inception_block_idx: Inception模型中用于计算FID的块索引
+    max_grad_norm: 最大梯度范数
+    num_fid_samples: FID样本数量
+    save_best_and_latest_only: 是否只保存最佳和最新模型
+    """
     def __init__(
         self,
         diffusion_model,
@@ -989,10 +1015,10 @@ class Trainer:
         max_grad_norm = 1.,
         num_fid_samples = 50000,
         save_best_and_latest_only = False
-    ):
-        super().__init__()
+    ):      
+        super().__init__()      # 调用父类的初始化方法
 
-        # accelerator
+        # accelerator   创建accelerate对象，用于加速训练和评估
 
         self.accelerator = Accelerator(
             split_batches = split_batches,
@@ -1001,70 +1027,70 @@ class Trainer:
 
         # model
 
-        self.model = diffusion_model
-        self.channels = diffusion_model.channels
-        is_ddim_sampling = diffusion_model.is_ddim_sampling
+        self.model = diffusion_model        # 创建diffusion_model对象
+        self.channels = diffusion_model.channels        # 获取diffusion_model的通道数
+        is_ddim_sampling = diffusion_model.is_ddim_sampling        # 判断是否使用ddim采样
 
         # default convert_image_to depending on channels
 
-        if not exists(convert_image_to):
+        if not exists(convert_image_to):    # 如果convert_image_to不存在，则根据通道数创建一个默认的转换函数
             convert_image_to = {1: 'L', 3: 'RGB', 4: 'RGBA'}.get(self.channels)
 
-        # sampling and training hyperparameters
+        # sampling and training hyperparameters 训练和采样超参数
 
-        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'
-        self.num_samples = num_samples
-        self.save_and_sample_every = save_and_sample_every
+        assert has_int_squareroot(num_samples), 'number of samples must have an integer square root'    # 确保采样数量是整数平方
+        self.num_samples = num_samples      # 设置采样数量
+        self.save_and_sample_every = save_and_sample_every      # 设置保存和采样间隔
 
-        self.batch_size = train_batch_size
-        self.gradient_accumulate_every = gradient_accumulate_every
-        assert (train_batch_size * gradient_accumulate_every) >= 16, f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'
+        self.batch_size = train_batch_size        # 设置训练批次大小
+        self.gradient_accumulate_every = gradient_accumulate_every      # 设置梯度累积次数
+        assert (train_batch_size * gradient_accumulate_every) >= 16, f'your effective batch size (train_batch_size x gradient_accumulate_every) should be at least 16 or above'     # 确保训练批次大小乘以梯度累积次数大于等于16
 
-        self.train_num_steps = train_num_steps
-        self.image_size = diffusion_model.image_size
+        self.train_num_steps = train_num_steps        # 设置训练步数
+        self.image_size = diffusion_model.image_size    # 设置图像大小
 
-        self.max_grad_norm = max_grad_norm
+        self.max_grad_norm = max_grad_norm        # 设置最大梯度范数
 
-        # dataset and dataloader
+        # dataset and dataloader        创建Dataset对象，用于加载数据集
 
-        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+        self.ds = Dataset(folder, self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)      # 创建Dataset对象，用于加载数据集
 
-        assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
+        assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'   # 确保数据集的长度大于等于100,最好有1w张图片
 
-        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())
+        dl = DataLoader(self.ds, batch_size = train_batch_size, shuffle = True, pin_memory = True, num_workers = cpu_count())   # 创建DataLoader对象，用于加载数据集，batch_size为训练批次大小，shuffle表示是否打乱数据集，pin_memory表示是否使用pin_memory加速，num_workers表示加载数据的线程数
 
-        dl = self.accelerator.prepare(dl)
-        self.dl = cycle(dl)
+        dl = self.accelerator.prepare(dl)       # 准备DataLoader对象，用于加载数据集
+        self.dl = cycle(dl)         # 创建一个循环迭代器，用于加载数据集
 
         # optimizer
 
-        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)
+        self.opt = Adam(diffusion_model.parameters(), lr = train_lr, betas = adam_betas)    # 创建Adam优化器，用于训练模型
 
-        # for logging results in a folder periodically
+        # for logging results in a folder periodically      创建一个用于记录结果的文件夹
 
-        if self.accelerator.is_main_process:
-            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)
-            self.ema.to(self.device)
+        if self.accelerator.is_main_process:        # 如果当前进程是主进程，则创建一个用于记录结果的文件夹
+            self.ema = EMA(diffusion_model, beta = ema_decay, update_every = ema_update_every)      # 创建一个ema对象，用于ema模型
+            self.ema.to(self.device)    # 将ema模型移动到当前设备
 
-        self.results_folder = Path(results_folder)
-        self.results_folder.mkdir(exist_ok = True)
+        self.results_folder = Path(results_folder)      # 创建一个用于记录结果的文件夹
+        self.results_folder.mkdir(exist_ok = True)      # 如果文件夹不存在，则创建文件夹
 
         # step counter state
 
-        self.step = 0
+        self.step = 0   # 设置当前步数
 
         # prepare model, dataloader, optimizer with accelerator
 
-        self.model, self.opt = self.accelerator.prepare(self.model, self.opt)
+        self.model, self.opt = self.accelerator.prepare(self.model, self.opt)   # 准备模型，数据加载器，优化器
 
         # FID-score computation
 
-        self.calculate_fid = calculate_fid and self.accelerator.is_main_process
+        self.calculate_fid = calculate_fid and self.accelerator.is_main_process     # 如果需要计算FID分数并且当前进程是主进程，则创建一个FIDEvaluation对象
 
-        if self.calculate_fid:
+        if self.calculate_fid:      
             from denoising_diffusion_pytorch.fid_evaluation import FIDEvaluation
 
-            if not is_ddim_sampling:
+            if not is_ddim_sampling:    # 如果不使用ddim采样，则打印警告：
                 self.accelerator.print(
                     "WARNING: Robust FID computation requires a lot of generated samples and can therefore be very time consuming."\
                     "Consider using DDIM sampling to save time."
@@ -1080,20 +1106,20 @@ class Trainer:
                 device=self.device,
                 num_fid_samples=num_fid_samples,
                 inception_block_idx=inception_block_idx
-            )
+            )       # 创建一个FIDEvaluation对象，用于计算FID分数
 
-        if save_best_and_latest_only:
+        if save_best_and_latest_only:   # 如果只保存最佳和最新模型，则创建一个best_fid变量，用于保存最佳FID分数
             assert calculate_fid, "`calculate_fid` must be True to provide a means for model evaluation for `save_best_and_latest_only`."
             self.best_fid = 1e10 # infinite
 
-        self.save_best_and_latest_only = save_best_and_latest_only
+        self.save_best_and_latest_only = save_best_and_latest_only      # 设置是否只保存最佳和最新模型
 
     @property
-    def device(self):
-        return self.accelerator.device
+    def device(self):   # 获取当前加速器设备
+        return self.accelerator.device  
 
-    def save(self, milestone):
-        if not self.accelerator.is_local_main_process:
+    def save(self, milestone):      # 保存模型
+        if not self.accelerator.is_local_main_process:      # 如果当前进程不是本地主进程，则返回
             return
 
         data = {
@@ -1103,91 +1129,94 @@ class Trainer:
             'ema': self.ema.state_dict(),
             'scaler': self.accelerator.scaler.state_dict() if exists(self.accelerator.scaler) else None,
             'version': __version__
-        }
+        }       # 创建一个字典，用于保存模型参数和优化器参数
 
-        torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))
+        torch.save(data, str(self.results_folder / f'model-{milestone}.pt'))        # 保存模型参数和优化器参数
 
-    def load(self, milestone):
+    def load(self, milestone):      # 加载模型
         accelerator = self.accelerator
         device = accelerator.device
 
-        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device, weights_only=True)
+        data = torch.load(str(self.results_folder / f'model-{milestone}.pt'), map_location=device, weights_only=True)   # 加载模型参数和优化器参数
 
-        model = self.accelerator.unwrap_model(self.model)
-        model.load_state_dict(data['model'])
+        model = self.accelerator.unwrap_model(self.model)           # 解包装模型
+        model.load_state_dict(data['model'])        # 加载模型参数
 
-        self.step = data['step']
-        self.opt.load_state_dict(data['opt'])
-        if self.accelerator.is_main_process:
+        self.step = data['step']        # 设置当前步数
+        self.opt.load_state_dict(data['opt'])       # 加载优化器参数
+        if self.accelerator.is_main_process:    # 如果当前进程是主进程，则加载ema模型
             self.ema.load_state_dict(data["ema"])
 
-        if 'version' in data:
+        if 'version' in data:   # 如果数据中包含版本信息，则打印版本信息
             print(f"loading from version {data['version']}")
 
-        if exists(self.accelerator.scaler) and exists(data['scaler']):
+        if exists(self.accelerator.scaler) and exists(data['scaler']):      # 如果加速器中有缩放器并且数据中包含缩放器信息，则加载缩放器
             self.accelerator.scaler.load_state_dict(data['scaler'])
 
+    """
+    训练模型: 通过反向传播和梯度下降，优化模型参数以最小化损失函数。使用 accelerator 工具，支持多GPU和分布式训练。
+    """
     def train(self):
-        accelerator = self.accelerator
-        device = accelerator.device
+        accelerator = self.accelerator        # 获取加速器
+        device = accelerator.device           # 获取设备
 
-        with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:
+        with tqdm(initial = self.step, total = self.train_num_steps, disable = not accelerator.is_main_process) as pbar:    # 创建一个进度条, 从self.step开始, 训练self.train_num_steps步, 只在主进程显示进度条。
 
-            while self.step < self.train_num_steps:
-                self.model.train()
+            while self.step < self.train_num_steps:     # 当步数小于训练步数时，继续训练
+                self.model.train()      # 设置模型为训练模式
 
-                total_loss = 0.
+                total_loss = 0.      # 初始化总损失
 
-                for _ in range(self.gradient_accumulate_every):
-                    data = next(self.dl).to(device)
+                for _ in range(self.gradient_accumulate_every):     # 控制每多少个小批量（mini-batch）进行一次梯度更新。通过累积梯度，可以模拟更大的批量效果，同时降低显存消耗。
+                    data = next(self.dl).to(device)        # 从数据加载器dl中获取数据并移动到设备上。
 
-                    with self.accelerator.autocast():
-                        loss = self.model(data)
-                        loss = loss / self.gradient_accumulate_every
-                        total_loss += loss.item()
+                    with self.accelerator.autocast():       # 在训练过程中，自动选择使用fp16或fp32进行计算，以提高训练速度和减少显存占用。
+                        loss = self.model(data)             # 进行前向传播，计算损失
+                        loss = loss / self.gradient_accumulate_every        # 平均损失, 将损失除以gradient_accumulate_every，以模拟更大的批量效果，同时降低显存消耗。
+                        total_loss += loss.item()            # 累加损失
 
-                    self.accelerator.backward(loss)
+                    self.accelerator.backward(loss)         # 反向传播,计算梯度
 
-                pbar.set_description(f'loss: {total_loss:.4f}')
+                pbar.set_description(f'loss: {total_loss:.4f}')         # 设置进度条描述
 
-                accelerator.wait_for_everyone()
-                accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                accelerator.wait_for_everyone()         # 等待所有进程完成, 确保所有进程都完成梯度计算
+                accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)     # 裁剪梯度, 防止梯度爆炸, 将梯度范数限制在 self.max_grad_norm 以内。
 
-                self.opt.step()
-                self.opt.zero_grad()
+                self.opt.step()      # 使用优化器更新模型参数
+                self.opt.zero_grad()  # 清空梯度, 在每次更新参数之前，需要清空梯度，以避免梯度累积。
 
-                accelerator.wait_for_everyone()
+                accelerator.wait_for_everyone()         # 等待所有进程完成, 确保所有进程都完成梯度计算
 
-                self.step += 1
-                if accelerator.is_main_process:
-                    self.ema.update()
+                self.step += 1      # 更新步数
+                if accelerator.is_main_process:      # 如果当前进程是主进程
+                    self.ema.update()      # 更新ema模型
+                    
+                    # 保存和采样
+                    if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):      # 如果步数不为0并且是保存和采样间隔的倍数
+                        self.ema.ema_model.eval()       # 切换 EMA 模型到评估模式
 
-                    if self.step != 0 and divisible_by(self.step, self.save_and_sample_every):
-                        self.ema.ema_model.eval()
+                        with torch.inference_mode():     # 使用推理模式, 关闭梯度计算
+                            milestone = self.step // self.save_and_sample_every      # 计算当前步数除以保存和采样间隔的商
+                            batches = num_to_groups(self.num_samples, self.batch_size)      # 将num_samples分成多个批次, 每个批次的大小为self.batch_size
+                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))      # 采样, 使用ema模型采样, 每个批次的大小为n，返回一个列表。如果batches=[10, 10, 9], 则返回3个列表，列表的大小为10,10,9。
+                        all_images = torch.cat(all_images_list, dim = 0)        # 将所有采样结果拼接成一个张量
 
-                        with torch.inference_mode():
-                            milestone = self.step // self.save_and_sample_every
-                            batches = num_to_groups(self.num_samples, self.batch_size)
-                            all_images_list = list(map(lambda n: self.ema.ema_model.sample(batch_size=n), batches))
+                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))     # 保存采样结果
 
-                        all_images = torch.cat(all_images_list, dim = 0)
-
-                        utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))
-
-                        # whether to calculate fid
+                        # whether to calculate fid  计算FID分数
 
                         if self.calculate_fid:
-                            fid_score = self.fid_scorer.fid_score()
-                            accelerator.print(f'fid_score: {fid_score}')
+                            fid_score = self.fid_scorer.fid_score()      # 计算FID分数
+                            accelerator.print(f'fid_score: {fid_score}')     # 打印FID分数
 
-                        if self.save_best_and_latest_only:
-                            if self.best_fid > fid_score:
-                                self.best_fid = fid_score
-                                self.save("best")
+                        if self.save_best_and_latest_only:   # 如果需要保存最佳和最新模型
+                            if self.best_fid > fid_score:      # 如果当前FID分数小于最佳FID分数
+                                self.best_fid = fid_score      # 更新最佳FID分数
+                                self.save("best")      # 保存最佳模型
                             self.save("latest")
                         else:
                             self.save(milestone)
 
-                pbar.update(1)
+                pbar.update(1)       # 更新进度条
 
-        accelerator.print('training complete')
+        accelerator.print('training complete')      # 打印训练完成信息
