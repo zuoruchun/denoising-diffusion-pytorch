@@ -302,7 +302,7 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
         dim,        # 模型维度
         init_dim = None,  # 初始维度  
         out_dim = None,    # 输出维度   
-        dim_mults = (1, 2, 4, 8),    # 维度倍数
+        dim_mults = (1, 2, 4, 8),    # 维度倍数,在Unet中，dim_mults = (1, 2, 4, 8)，表示在Unet中，初始维度为64，然后每次将维度乘以2，4，8
         channels = 3,    # 通道数
         self_condition = False,    # 是否使用自条件，即使用前一步的预测作为额外输入
         learned_variance = False,    # 是否学习噪声方差
@@ -468,50 +468,54 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
         return 2 ** (len(self.downs) - 1)  # 下采样因子，2的幂次，len(self.downs) - 1表示下采样次数
     
     # 定义一个方法，用于前向传播
-    def forward(self, x, time, x_self_cond = None):     # 参数分别是输入图像x，时间time，自条件x_self_cond
+    def forward(self, x, time, x_self_cond = None):     # 参数分别是输入图像x(16, 3, 128, 128)，时间time(16, 1)，自条件x_self_cond(16, 3, 128, 128)
         assert all([divisible_by(d, self.downsample_factor) for d in x.shape[-2:]]), f'your input dimensions {x.shape[-2:]} need to be divisible by {self.downsample_factor}, given the unet'
         # 断言，确保输入的维度是下采样因子的倍数，否则会报错
         if self.self_condition:     # 如果使用自条件，则将自条件和输入图像拼接
             x_self_cond = default(x_self_cond, lambda: torch.zeros_like(x))     # 如果输入的自条件为None，则生成一个和输入图像x相同大小的全0张量，否则输入x_self_cond，也就是上一步预测结果
-            x = torch.cat((x_self_cond, x), dim = 1)     # 将自条件和输入图像拼接，dim=1表示在通道维度上拼接
+            x = torch.cat((x_self_cond, x), dim = 1)     # 将自条件和输入图像拼接，dim=1表示在通道维度上拼接,shape变成(batch_size, 2 * channels, height, width)，下面的shape变化是在假设没有自条件的情况下
 
-        x = self.init_conv(x)   # 初始化卷积层，输入图像x，输出卷积后的图像x
+        # 初始化卷积层
+        x = self.init_conv(x)   # shape变成(16, 64, 128, 128)
         r = x.clone()    # 克隆输入图像x，用于存储中间结果  
 
-        t = self.time_mlp(time)    # 时间嵌入，输入时间time，输出时间嵌入t
+        # 时间嵌入
+        t = self.time_mlp(time)    # 输入时间time，输出时间嵌入t
 
         h = []    # 定义一个列表，用于存储中间结果
 
-        # 遍历下采样块
+        # 遍历下采样块(执行次数由dim_mults的长度决定)
         for block1, block2, attn, downsample in self.downs:
-            x = block1(x, t)    # block在前面已经实例化了，这里是调用block了。而ResnetBlock直接调用了forward，这是因为nn.Module 实现了 __call__ ，方法__call__ 方法内部会调用 forward
+            x = block1(x, t)    # 调用Block的forward方法，shape变成(16, 64, 128, 128)（不变）
             h.append(x)    # 将 x 添加到 h 列表中，用于存储中间结果
 
-            x = block2(x, t)    # 输入 x 通过第二个残差块 block2，同时注入时间条件 t
-            x = attn(x) + x    # 对 x 进行注意力机制 attn，然后将结果与 x 相加
+            x = block2(x, t)    # 调用Block的forward方法，shape变成(16, 64, 128, 128)（不变）
+            x = attn(x) + x    # 对x进行注意力机制，然后将结果与x相加，shape变成(16, 64, 128, 128)（不变）
             h.append(x)    # 将 x 添加到 h 列表中，用于存储中间结果
 
-            x = downsample(x)   # 下采样，输入x，输出下采样后的图像x
+            x = downsample(x)   # 调用Downsample的forward方法，经过3次下采样，shape变化情况：(16, 64, 128, 128) -> (16, 128, 64, 64) -> (16, 256, 32, 32) -> (16, 512, 16, 16)
 
-        x = self.mid_block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
-        x = self.mid_attn(x) + x    # 对x进行注意力机制，然后将结果与x相加
-        x = self.mid_block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
+        # 中间块
+        x = self.mid_block1(x, t)    # 调用forward方法，同时嵌入时间t，shape变成(16, 512, 16, 16)
+        x = self.mid_attn(x) + x    # 对x进行注意力机制，然后将结果与x相加，shape变成(16, 512, 16, 16)
+        x = self.mid_block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t，shape变成(16, 512, 16, 16)
 
-        # 遍历上采样块
+        # 遍历上采样块(执行次数由dim_mults的长度决定)
         for block1, block2, attn, upsample in self.ups:
-            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接，dim=1表示在通道维度上拼接
-            x = block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
+            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接（并删除h列表中的最后一个元素），dim=1表示在通道维度上拼接，维度变化：(16, 512, 16, 16) -> (16, 1024, 16, 16) ->(16, 256, 32, 32)（来自upsample） -> (16, 128, 64, 64)
+            x = block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t，维度变化：(16, 1024, 16, 16) -> (16, 256, 16, 16) -> (16, 128, 32, 32) -> (16, 64, 64, 64)
 
-            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接，dim=1表示在通道维度上拼接
-            x = block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
-            x = attn(x) + x    # 对x进行注意力机制，然后将结果与x相加
+            x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接（并删除h列表中的最后一个元素），dim=1表示在通道维度上拼接，维度变化：(16, 256, 16, 16) -> (16, 512, 16, 16) -> (16, 256, 32, 32) -> (16, 128, 64, 64)
+            x = block2(x, t)    # 调用Block的forward方法，维度变化：(16, 512, 16, 16) -> (16, 256, 16, 16) -> (16, 128, 32, 32) -> (16, 64, 64, 64)
+            x = attn(x) + x    # 对x进行注意力机制，然后将结果与x相加，维度变化：(16, 256, 16, 16) -> (16, 256, 16, 16) -> (16, 128, 32, 32) -> (16, 64, 64, 64)
 
-            x = upsample(x)    # 上采样，输入x，输出上采样后的图像x
+            x = upsample(x)    # 调用Upsample的forward方法，经过3次上采样，维度变化：(16, 256, 16, 16) -> (16, 128, 32, 32) -> (16, 64, 64, 64) -> (16, 64, 128, 128)
 
-        x = torch.cat((x, r), dim = 1)    # 将原始图像r和上采样后的图像x拼接，dim=1表示在通道维度上拼接
+        x = torch.cat((x, r), dim = 1)    # 将原始图像r和上采样后的图像x拼接，dim=1表示在通道维度上拼接，维度变化：(16, 64, 128, 128) -> (16, 128, 128, 128)
 
-        x = self.final_res_block(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t
-        return self.final_conv(x)    # 输入x，输出卷积后的图像x
+        # 最终块
+        x = self.final_res_block(x, t)    # 调用Block的forward方法，维度变化：(16, 128, 128, 128) -> (16, 64, 128, 128)
+        return self.final_conv(x)    # 调用Conv2d的forward方法，维度变化：(16, 64, 128, 128) -> (16, 3, 128, 128)
 
 # gaussian diffusion trainer class
 
@@ -698,19 +702,19 @@ class GaussianDiffusion(Module):
         return (
             (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) / \
             extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)     # 通过正向过程求解噪声
-        )
+        )       # 计算公式：noise = (x_t - sqrt(alpha_t) * x_0) / sqrt(1 - alpha_t)
 
-    def predict_v(self, x_start, t, noise):         # 从噪声预测v, v是一个参数化的噪声
+    def predict_v(self, x_start, t, noise):         # 从噪声预测v, v是一个参数化的噪声（论文中没有提到）
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * noise -
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_start
-        )
+        )       # 计算公式：v = sqrt(alpha_t) * noise - sqrt(1 - alpha_t) * x_start
 
     def predict_start_from_v(self, x_t, t, v):      # 从v预测原始图像
         return (
             extract(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
-        )
+        )       # 计算公式：x_start = sqrt(alpha_t) * x_t - sqrt(1 - alpha_t) * v
 
     def q_posterior(self, x_start, x_t, t):         # 计算后验分布
         posterior_mean = (
@@ -870,7 +874,7 @@ class GaussianDiffusion(Module):
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )       # 正向过程公式
+        )       # 正向过程公式x_t = sqrt(alpha_t) * x_0 + sqrt(1 - alpha_t) * epsilon
 
     def p_losses(self, x_start, t, noise = None, offset_noise_strength = None):     # 计算损失函数
         b, c, h, w = x_start.shape      # 获取batch_size，通道数，高度，宽度
@@ -901,14 +905,14 @@ class GaussianDiffusion(Module):
 
         # predict and take gradient step        预测并采取梯度步骤
 
-        model_out = self.model(x, t, x_self_cond)       # 调用model，输入x和t，输出模型的输出
+        model_out = self.model(x, t, x_self_cond)       # 调用model，根据实例化对象知道实际上就是调用了Unet中的forward方法
 
         if self.objective == 'pred_noise':      # 如果目标是预测噪声
             target = noise          # 目标是噪声
         elif self.objective == 'pred_x0':       # 如果目标是预测图像起始
             target = x_start        # 目标是图像起始
-        elif self.objective == 'pred_v':        # 如果目标是预测v
-            v = self.predict_v(x_start, t, noise)       # 从噪声预测v
+        elif self.objective == 'pred_v':        # 如果目标是预测v（参数化噪声，论文中没有提到）
+            v = self.predict_v(x_start, t, noise)       # 利用公式v = sqrt(alpha_t) * noise - sqrt(1 - alpha_t) * x_start，从噪声预测v
             target = v
         else:
             raise ValueError(f'unknown objective {self.objective}')
@@ -922,9 +926,9 @@ class GaussianDiffusion(Module):
     def forward(self, img, *args, **kwargs):        # forward方法，用于计算损失
         b, c, h, w, device, img_size, = *img.shape, img.device, self.image_size     # 获取batch_size，通道数，高度，宽度，设备，图像大小
         assert h == img_size[0] and w == img_size[1], f'height and width of image must be {img_size}'   # 确保图像的高度和宽度与图像大小相同
-        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()        # 随机生成batch_size个时间步t
+        t = torch.randint(0, self.num_timesteps, (b,), device=device).long()        # 随机生成batch_size个时间步t. 对应论文中的t~U(0,T)
 
-        img = self.normalize(img)       # 正则化图像,即将图像归一化到[-1,1]
+        img = self.normalize(img)       # 正则化图像,即将图像归一化到[-1,1],这里的img就是原始图片x_0
         return self.p_losses(img, t, *args, **kwargs)       # 计算损失并返回
 
 # dataset classes
@@ -970,7 +974,7 @@ class Trainer:
     folder: 数据集路径
     **kwargs: 其他参数
     train_batch_size: 训练批次大小
-    gradient_accumulate_every: 梯度累积次数
+    gradient_accumulate_every: 梯度累积次数,比如显存有限，只能支持16个batch，但是希望模拟64个batch的效果，那么就设置为4. 那么每4个batch进行一次梯度更新。
     augment_horizontal_flip: 是否进行水平翻转
     train_lr: 训练学习率
     train_num_steps: 训练步数
@@ -1155,6 +1159,7 @@ class Trainer:
 
     """
     训练模型: 通过反向传播和梯度下降，优化模型参数以最小化损失函数。使用 accelerator 工具，支持多GPU和分布式训练。
+    循环训练步数，计算每一步的loss（为了减小显存占用，使用gradient_accumulate_every控制每多少个小批量（mini-batch）进行一次梯度更新。）
     """
     def train(self):
         accelerator = self.accelerator        # 获取加速器
@@ -1168,21 +1173,21 @@ class Trainer:
                 total_loss = 0.      # 初始化总损失
 
                 for _ in range(self.gradient_accumulate_every):     # 控制每多少个小批量（mini-batch）进行一次梯度更新。通过累积梯度，可以模拟更大的批量效果，同时降低显存消耗。
-                    data = next(self.dl).to(device)        # 从数据加载器dl中获取数据并移动到设备上。
+                    data = next(self.dl).to(device)        # 从数据加载器dl中获取数据并移动到设备上。将初始化中的数据加载器dl中的数据移动到设备上。如果我们的batch_size=16，那么每次获取16个数据，data的形状就是(16,3,128,128)
 
                     with self.accelerator.autocast():       # 在训练过程中，自动选择使用fp16或fp32进行计算，以提高训练速度和减少显存占用。
-                        loss = self.model(data)             # 进行前向传播，计算损失
-                        loss = loss / self.gradient_accumulate_every        # 平均损失, 将损失除以gradient_accumulate_every，以模拟更大的批量效果，同时降低显存消耗。
+                        loss = self.model(data)             # model被实例化，因此这里会调用diffusion_model中的forward方法，即进行前向传播，计算损失。
+                        loss = loss / self.gradient_accumulate_every        # 以保证使用gradient_accumulate_every的梯度累积和直接计算所有banch的损失效果相同。
                         total_loss += loss.item()            # 累加损失
 
                     self.accelerator.backward(loss)         # 反向传播,计算梯度
 
-                pbar.set_description(f'loss: {total_loss:.4f}')         # 设置进度条描述
+                pbar.set_description(f'loss: {total_loss:.4f}')         # 设置进度条描述,显示的是每一步的损失
 
                 accelerator.wait_for_everyone()         # 等待所有进程完成, 确保所有进程都完成梯度计算
                 accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)     # 裁剪梯度, 防止梯度爆炸, 将梯度范数限制在 self.max_grad_norm 以内。
 
-                self.opt.step()      # 使用优化器更新模型参数
+                self.opt.step()      # 根据计算出的梯度，使用优化器更新模型参数
                 self.opt.zero_grad()  # 清空梯度, 在每次更新参数之前，需要清空梯度，以避免梯度累积。
 
                 accelerator.wait_for_everyone()         # 等待所有进程完成, 确保所有进程都完成梯度计算
@@ -1220,3 +1225,49 @@ class Trainer:
                 pbar.update(1)       # 更新进度条
 
         accelerator.print('training complete')      # 打印训练完成信息
+
+
+if __name__ == "__main__":
+    import torch 
+    from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
+
+    model = Unet(
+        dim = 64,
+        dim_mults = (1, 2, 4, 8),
+        flash_attn = True
+    )
+
+    diffusion = GaussianDiffusion(
+        model,
+        image_size = 128,
+        timesteps = 1000,           # number of steps
+        sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
+    )
+
+    trainer = Trainer(
+        diffusion,
+        'path/to/your/images',
+        train_batch_size = 32,
+        train_lr = 8e-5,
+        train_num_steps = 700000,         # total training steps
+        gradient_accumulate_every = 2,    # gradient accumulation steps
+        ema_decay = 0.995,                # exponential moving average decay
+        amp = True,                       # turn on mixed precision
+        calculate_fid = True              # whether to calculate fid during training
+    )
+
+    trainer.train()
+
+
+
+"""
+对于原始图片，首先由Trainer中的init方法，将图片数据加载到内存中，然后通过数据加载器dl，将数据加载到设备上。
+在train方法中，每次取出batch_size大小的数据，进行训练。将数据(batch_size,3,128,128)送入模型中，进行训练。
+模型调用diffusion_model中的forward方法计算损失：
+    会在0-T之间随机选择一个时间步t，然后将img和t传入到p_losses方法中。
+    在p_losses方法中，会调用q_sample方法，将原始图片img按照论文中的公式x_t = sqrt(alpha_t) * x_0 + sqrt(1 - alpha_t) * epsilon，生成t时刻的噪声图片x_t。
+    然后调用model（Unet）的forward方法，将x_t和t传入到forward方法中，在里面通过卷积层，采样层，残差连接，上采样层,输出prod_v, 通过计算prod_v和target的均方误差，得到损失。
+对loss进行反向传播，并更新模型参数。然后进行下一步训练。
+最终是预测出噪声
+
+"""
