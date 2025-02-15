@@ -109,8 +109,13 @@ class RMSNorm(Module):       # 实现一种基于均方根（Root Mean Square）
     def forward(self, x):
         return F.normalize(x, dim = 1) * self.g * self.scale    # \frac{x_i}{\sqrt{\sum(x_i^2)} + epsilon}
 
-# sinusoidal positional embeds
+# sinusoidal positional embeds      正弦位置编码
 
+"""
+这个 SinusoidalPosEmb 函数通过为每个位置生成独特的嵌入向量，为扩散模型中的每个时间步提供了必要的时间信息。
+在DDPM这类扩散模型中，它帮助模型理解不同时间步之间的相对关系、避免顺序丢失，同时也提高了模型的稳定性和泛化能力。
+通过正弦和余弦的周期性结构，这种位置编码在长序列生成和多步骤生成中表现出了优越性。
+"""
 class SinusoidalPosEmb(Module):         # 正弦位置编码（Sinusoidal Positional Embedding） 模块，用于将离散的时间步（timestep）映射为连续的特征表示。
     def __init__(self, dim, theta = 10000):     # dim: 输入张量的维度，theta: 控制波长分布的常数
         super().__init__()
@@ -155,7 +160,7 @@ class RandomOrLearnedSinusoidalPosEmb(Module):
     
 
 # building block modules
-# 残差块
+# 基础块，用于特征提取和处理
 class Block(Module):
     def __init__(self, dim, dim_out, dropout = 0.):     # 初始化模型参数
         super().__init__()
@@ -175,7 +180,7 @@ class Block(Module):
         x = self.act(x)    # 使用SiLU激活函数
         return self.dropout(x)    # 使用dropout
 
-# 残差块
+# 残差块，基于基础块Block，通过引入时间嵌入，增强模型的特征表达能力和对时间的敏感性
 class ResnetBlock(Module):
     def __init__(self, dim, dim_out, *, time_emb_dim = None, dropout = 0.):
         super().__init__()
@@ -346,13 +351,13 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
             sinu_pos_emb = SinusoidalPosEmb(dim, theta = sinusoidal_pos_emb_theta)
             fourier_dim = dim
 
-        # 时间映射网络（这个没看）
-        self.time_mlp = nn.Sequential(
-            sinu_pos_emb,       
-            nn.Linear(fourier_dim, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim)
-        )
+        # 对时间的多层感知器（mlp：Multi-Layer Perceptron，多层感知器）
+        self.time_mlp = nn.Sequential(          # Sequential允许你将多个层按顺序组合在一起，形成一个模块化的神经网络。
+            sinu_pos_emb,        # 将正弦位置编码sinu_pos_emb作为第一个层,用于将离散的时间步（timestep）映射为连续的特征表示。
+            nn.Linear(fourier_dim, time_dim),    # 线性层，将正弦位置编码sinu_pos_emb的维度从fourier_dim变换为time_dim
+            nn.GELU(),    # 激活函数，GELU（Gaussian Error Linear Units）是一种非线性激活函数，用于提高神经网络的表达能力。
+            nn.Linear(time_dim, time_dim)    # 线性层，将time_dim变换为time_dim
+        )       # 在扩散模型中，时间嵌入有助于模型理解当前所处理的图像处于扩散过程的哪个阶段（如早期噪声较大、后期噪声较小），从而在不同时间步下做出更合理的预测和调整。
 
         # attention
 
@@ -485,7 +490,7 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
         h = []    # 定义一个列表，用于存储中间结果
 
         # 遍历下采样块(执行次数由dim_mults的长度决定)
-        for block1, block2, attn, downsample in self.downs:
+        for block1, block2, attn, downsample in self.downs:     # resnet_block, resnet_block, attn_klass, Downsample
             x = block1(x, t)    # 调用Block的forward方法，shape变成(16, 64, 128, 128)（不变）
             h.append(x)    # 将 x 添加到 h 列表中，用于存储中间结果
 
@@ -501,7 +506,7 @@ class Unet(Module):     # 定义Unet模型，继承自Module，Moudle来自torch
         x = self.mid_block2(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t，shape变成(16, 512, 16, 16)
 
         # 遍历上采样块(执行次数由dim_mults的长度决定)
-        for block1, block2, attn, upsample in self.ups:
+        for block1, block2, attn, upsample in self.ups:     # resnet_block, resnet_block, attn_klass, Upsample
             x = torch.cat((x, h.pop()), dim = 1)    # 将x和h列表中的最后一个元素拼接（并删除h列表中的最后一个元素），dim=1表示在通道维度上拼接，维度变化：(16, 512, 16, 16) -> (16, 1024, 16, 16) ->(16, 256, 32, 32)（来自upsample） -> (16, 128, 64, 64)
             x = block1(x, t)    # 输入x和时间t，调用forward方法，同时嵌入时间t，维度变化：(16, 1024, 16, 16) -> (16, 256, 16, 16) -> (16, 128, 32, 32) -> (16, 64, 64, 64)
 
@@ -1253,7 +1258,7 @@ if __name__ == "__main__":
         gradient_accumulate_every = 2,    # gradient accumulation steps
         ema_decay = 0.995,                # exponential moving average decay
         amp = True,                       # turn on mixed precision
-        calculate_fid = True              # whether to calculate fid during training
+        calculate_fid = False              # whether to calculate fid during training
     )
 
     trainer.train()
