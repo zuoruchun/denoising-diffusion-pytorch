@@ -1247,7 +1247,7 @@ if __name__ == "__main__":
         model,
         image_size = 256,        # 图像大小
         timesteps = 1000,           # number of steps       步数
-        sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])  采样步数<步数时，使用ddim采样，否则使用ddpm采样
+        sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])  采样步数<步数时，使用ddim采样，否则使用ddpm采样(1)
     )
 
     trainer = Trainer(
