@@ -1240,22 +1240,22 @@ if __name__ == "__main__":
     model = Unet(
         dim = 64,
         dim_mults = (1, 2, 4, 8),
-        flash_attn = True
+        flash_attn = False          # 是否使用flash注意力
     )
 
     diffusion = GaussianDiffusion(
         model,
-        image_size = 128,
-        timesteps = 1000,           # number of steps
-        sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
+        image_size = 256,        # 图像大小
+        timesteps = 1000,           # number of steps       步数
+        sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])  采样步数<步数时，使用ddim采样，否则使用ddpm采样
     )
 
     trainer = Trainer(
         diffusion,
-        'path/to/your/images',
-        train_batch_size = 32,
+        '/home/zuoruchun/datasets/ddpm/church_outdoor',
+        train_batch_size = 8,
         train_lr = 8e-5,
-        train_num_steps = 700000,         # total training steps
+        train_num_steps = 300000,         # total training steps
         gradient_accumulate_every = 2,    # gradient accumulation steps
         ema_decay = 0.995,                # exponential moving average decay
         amp = True,                       # turn on mixed precision
