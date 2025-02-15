@@ -1212,6 +1212,7 @@ class Trainer:
                         all_images = torch.cat(all_images_list, dim = 0)        # 将所有采样结果拼接成一个张量
 
                         utils.save_image(all_images, str(self.results_folder / f'sample-{milestone}.png'), nrow = int(math.sqrt(self.num_samples)))     # 保存采样结果
+                        print(f'sample-{milestone}.png 保存成功/n')
 
                         # whether to calculate fid  计算FID分数
 
